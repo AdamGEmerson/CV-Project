@@ -1,5 +1,5 @@
 .venv/
-.videos/
+videos/
 *.pyc
 .env
 .DS_Store

@@ -1,0 +1,29 @@
+{
+  "source_file": "data\\landmarks\\segment_111_smoothed_normalized.json",
+  "fps": 25.0,
+  "total_frames": 356,
+  "frames_with_features": 17,
+  "scale_method": "palm",
+  "feature_method": "distance_matrix",
+  "hand_idx": 1,
+  "feature_dim": 441,
+  "frame_indices": [
+    65,
+    193,
+    217,
+    218,
+    220,
+    222,
+    223,
+    224,
+    225,
+    226,
+    227,
+    228,
+    229,
+    230,
+    231,
+    232,
+    233
+  ]
+}

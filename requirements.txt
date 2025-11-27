@@ -1,0 +1,23 @@
+# Computer Vision
+opencv-python>=4.8.0
+mediapipe>=0.10.0
+
+# Scientific Computing
+numpy>=1.24.0
+scikit-learn>=1.3.0
+
+# Clustering
+hdbscan>=0.8.33
+
+# Video Processing
+ffmpeg-python>=0.2.0
+
+# Visualization (for notebooks)
+matplotlib>=3.7.0
+seaborn>=0.12.0
+Pillow>=10.0.0
+
+# Data Handling
+scipy>=1.11.0
+pandas>=2.0.0
+
