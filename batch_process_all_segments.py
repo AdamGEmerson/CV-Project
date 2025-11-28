@@ -7,7 +7,12 @@ import time
 from src.hand_tracking import extract_landmarks, save_landmarks, smooth_landmarks
 from src.normalization import normalize_from_json
 from src.feature_extraction import extract_all_hands_features
-from src.cluster import cluster_features, load_features_from_npz
+from src.cluster import (
+    cluster_features,
+    load_features_from_npz,
+    load_frame_landmarks,
+    summarize_cluster_landmarks
+)
 import numpy as np
 import json
 
@@ -17,7 +22,8 @@ def process_segment_pipeline(segment_path, segment_num, use_smoothing=True, smoo
     Process a single segment through the full pipeline.
     
     Returns:
-        Tuple of (hand0_features_path, hand1_features_path) or None if failed
+        Tuple of (hand0_features_path, hand1_features_path, smoothed_json_path) or None if failed
+        Note: Returns smoothed_json_path (original skeleton data) not normalized_json_path
     """
     segment_path = Path(segment_path)
     landmarks_dir = Path("data/landmarks")
@@ -36,7 +42,7 @@ def process_segment_pipeline(segment_path, segment_num, use_smoothing=True, smoo
             print(f"  [OK] Landmarks extracted: {len(landmarks)} frames")
         except Exception as e:
             print(f"  [FAIL] Failed to extract landmarks: {e}")
-            return None, None
+            return None, None, None
     else:
         print(f"  [OK] Landmarks already exist: {landmarks_json.name}")
         with open(landmarks_json, 'r') as f:
@@ -60,27 +66,44 @@ def process_segment_pipeline(segment_path, segment_num, use_smoothing=True, smoo
                 print(f"  [OK] Landmarks smoothed")
             except Exception as e:
                 print(f"  [FAIL] Failed to smooth landmarks: {e}")
-                return None, None
+                return None, None, None
         else:
             print(f"  [OK] Smoothed landmarks already exist: {smoothed_json.name}")
         
         normalized_json = landmarks_dir / f"segment_{segment_num:03d}_smoothed_normalized.json"
         input_json = smoothed_json
+        skeleton_json = smoothed_json  # Use smoothed (original) skeleton data
     else:
         normalized_json = landmarks_dir / f"segment_{segment_num:03d}_normalized.json"
         input_json = landmarks_json
+        skeleton_json = landmarks_json  # Use original skeleton data
     
-    # Step 3: Normalize landmarks
-    if not normalized_json.exists():
+    # Step 3: Normalize landmarks (ensure centroid metadata exists)
+    needs_normalization = not normalized_json.exists()
+    if not needs_normalization:
+        try:
+            with open(normalized_json, 'r') as f:
+                normalized_payload = json.load(f)
+            has_centroid_metadata = any(
+                isinstance(entry, dict) and 'hand_centroids' in entry
+                for entry in normalized_payload.get('landmarks', [])
+            )
+            if not has_centroid_metadata:
+                print(f"  [INFO] Existing normalized landmarks lack centroid metadata; regenerating.")
+                needs_normalization = True
+        except Exception:
+            needs_normalization = True
+    
+    if needs_normalization:
         print(f"  Step 3: Normalizing landmarks...")
         try:
             normalize_from_json(str(input_json), output_path=str(normalized_json), scale_method='palm')
             print(f"  [OK] Landmarks normalized")
         except Exception as e:
             print(f"  [FAIL] Failed to normalize landmarks: {e}")
-            return None, None
+            return None, None, None
     else:
-        print(f"  [OK] Normalized landmarks already exist: {normalized_json.name}")
+        print(f"  [OK] Normalized landmarks already include centroid metadata: {normalized_json.name}")
     
     # Step 4: Extract features
     if use_smoothing:
@@ -100,11 +123,11 @@ def process_segment_pipeline(segment_path, segment_num, use_smoothing=True, smoo
                   f"Hand1={results['hand1']['metadata']['frames_with_features']} frames")
         except Exception as e:
             print(f"  [FAIL] Failed to extract features: {e}")
-            return None, None
+            return None, None, None
     else:
         print(f"  [OK] Features already exist: {hand0_features.name}, {hand1_features.name}")
     
-    return hand0_features, hand1_features
+    return hand0_features, hand1_features, skeleton_json
 
 
 def combine_hands_features(hand0_path, hand1_path):
@@ -143,9 +166,9 @@ def main():
     landmarks_dir = Path("data/landmarks")
     
     # Clustering parameters
-    pca_components = 30
-    min_cluster_size = 40
-    min_samples = 40
+    pca_components = 6
+    min_cluster_size = 50
+    min_samples = 10
     use_smoothing = True
     smoothing_window = 11
     smoothing_polyorder = 2
@@ -156,21 +179,21 @@ def main():
             idx = sys.argv.index('--pca')
             pca_components = int(sys.argv[idx + 1])
         except (IndexError, ValueError):
-            print("Warning: Invalid --pca value, using default 30")
+            print("Warning: Invalid --pca value, using default 6")
     
     if '--min-size' in sys.argv:
         try:
             idx = sys.argv.index('--min-size')
             min_cluster_size = int(sys.argv[idx + 1])
         except (IndexError, ValueError):
-            print("Warning: Invalid --min-size value, using default 40")
+            print("Warning: Invalid --min-size value, using default 50")
     
     if '--min-samples' in sys.argv:
         try:
             idx = sys.argv.index('--min-samples')
             min_samples = int(sys.argv[idx + 1])
         except (IndexError, ValueError):
-            print("Warning: Invalid --min-samples value, using default 40")
+            print("Warning: Invalid --min-samples value, using default 10")
     
     if '--no-smoothing' in sys.argv:
         use_smoothing = False
@@ -206,7 +229,7 @@ def main():
         segment_num = int(segment_file.stem.split('_')[1])
         
         try:
-            hand0_path, hand1_path = process_segment_pipeline(
+            hand0_path, hand1_path, skeleton_json_path = process_segment_pipeline(
                 segment_file,
                 segment_num,
                 use_smoothing=use_smoothing,
@@ -214,7 +237,7 @@ def main():
                 smoothing_polyorder=smoothing_polyorder
             )
             
-            if hand0_path is None or hand1_path is None:
+            if hand0_path is None or hand1_path is None or skeleton_json_path is None:
                 failed_segments.append(segment_num)
                 continue
             
@@ -226,13 +249,18 @@ def main():
                 failed_segments.append(segment_num)
                 continue
             
+            # Load per-frame original skeleton landmarks (smoothed but NOT PCA-normalized)
+            # These are the raw MediaPipe coordinates before normalization
+            landmarks_lookup = load_frame_landmarks(skeleton_json_path)
+            
             # Add to combined dataset
             for i, frame in enumerate(common_frames):
                 all_combined_features.append(combined_features[i])
                 all_frame_info.append({
                     'segment': segment_num,
                     'frame': int(frame),
-                    'feature_idx': len(all_combined_features) - 1
+                    'feature_idx': len(all_combined_features) - 1,
+                    'hand_landmarks': landmarks_lookup.get(int(frame), [])
                 })
             
             successful_segments.append(segment_num)
@@ -280,10 +308,18 @@ def main():
         )
         
         labels = cluster_result['labels']
+        embeddings = cluster_result['X_reduced']
         
-        # Add cluster labels to frame info
+        # Add cluster labels and embedding coordinates to frame info
         for i, label in enumerate(labels):
+            embedding_row = embeddings[i]
+            x = float(embedding_row[0]) if len(embedding_row) > 0 else 0.0
+            y = float(embedding_row[1]) if len(embedding_row) > 1 else 0.0
+            z = float(embedding_row[2]) if len(embedding_row) > 2 else 0.0
             all_frame_info[i]['cluster'] = int(label)
+            all_frame_info[i]['x'] = x
+            all_frame_info[i]['y'] = y
+            all_frame_info[i]['z'] = z
         
         # Create results
         results = {
@@ -305,15 +341,16 @@ def main():
             'cluster_distribution': {
                 int(cluster): int(np.sum(labels == cluster))
                 for cluster in set(labels)
-            }
+            },
+            'cluster_landmarks': summarize_cluster_landmarks(all_frame_info)
         }
         
         # Save results
-        output_path = landmarks_dir / "all_segments_clustered.json"
+        output_path = landmarks_dir / "all_segments_clustered_with_xy.json"
         with open(output_path, 'w') as f:
             json.dump(results, f, indent=2)
         
-        labels_path = landmarks_dir / "all_segments_clustered.npy"
+        labels_path = landmarks_dir / "all_segments_clustered_with_xy.npy"
         np.save(labels_path, labels)
         
         print("="*60)

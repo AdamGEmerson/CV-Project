@@ -8,7 +8,121 @@ from pathlib import Path
 import json
 
 
-def cluster_features(X, pca_components=20, min_cluster_size=80, min_samples=20):
+def load_frame_landmarks(source_json_path):
+    """
+    Load per-frame hand landmarks (all 21 points per hand) from a landmarks JSON file.
+    This loads the ORIGINAL skeleton data (smoothed but not PCA-normalized).
+    Returns dict mapping frame index -> list of hand landmarks (each hand is a list of 21 [x, y, z] points).
+    """
+    if not source_json_path:
+        return {}
+    source_path = Path(source_json_path)
+    if not source_path.exists():
+        return {}
+    try:
+        with open(source_path, 'r') as f:
+            data = json.load(f)
+    except Exception:
+        return {}
+    
+    lookup = {}
+    for entry in data.get('landmarks', []):
+        frame_idx = int(entry.get('frame', 0))
+        hands = entry.get('hands', [])
+        # Store full landmarks: each hand is a list of 21 [x, y, z] coordinates
+        # These are the original MediaPipe coordinates (smoothed but not PCA-normalized)
+        lookup[frame_idx] = hands
+    return lookup
+
+
+def summarize_cluster_landmarks(clustered_frames):
+    """
+    Aggregate all 21 landmarks per hand for each cluster across frames.
+    Returns dict {cluster_id: {'hands': [ {hand_index, landmarks: [[x,y,z], ...], count}, ... ]}}
+    where landmarks is a list of 21 [x, y, z] coordinates.
+    """
+    cluster_summaries = {}
+    
+    for entry in clustered_frames:
+        landmarks_list = entry.get('hand_landmarks') or []
+        if not landmarks_list:
+            continue
+        cluster_id = entry.get('cluster')
+        if cluster_id is None:
+            continue
+        
+        # Initialize cluster summary if needed
+        if cluster_id not in cluster_summaries:
+            cluster_summaries[cluster_id] = {}
+        
+        # Process each hand in this frame
+        for hand_idx, hand_landmarks in enumerate(landmarks_list):
+            if not hand_landmarks or len(hand_landmarks) == 0:
+                continue
+            
+            # Initialize hand accumulator if needed
+            if hand_idx not in cluster_summaries[cluster_id]:
+                # Initialize accumulator for 21 landmarks
+                cluster_summaries[cluster_id][hand_idx] = {
+                    'landmark_sums': [[0.0, 0.0, 0.0] for _ in range(21)],
+                    'count': 0
+                }
+            
+            accum = cluster_summaries[cluster_id][hand_idx]
+            
+            # Sum up each landmark position
+            for landmark_idx in range(min(21, len(hand_landmarks))):
+                landmark = hand_landmarks[landmark_idx]
+                if len(landmark) >= 3:
+                    accum['landmark_sums'][landmark_idx][0] += float(landmark[0])
+                    accum['landmark_sums'][landmark_idx][1] += float(landmark[1])
+                    accum['landmark_sums'][landmark_idx][2] += float(landmark[2])
+            
+            accum['count'] += 1
+    
+    # Compute averages
+    result = {}
+    for cluster_id, hand_dict in cluster_summaries.items():
+        hands_output = []
+        for hand_idx in sorted(hand_dict.keys()):
+            accum = hand_dict[hand_idx]
+            if accum['count'] == 0:
+                continue
+            
+            # Average each landmark
+            avg_landmarks = []
+            for landmark_sum in accum['landmark_sums']:
+                avg_landmarks.append([
+                    landmark_sum[0] / accum['count'],
+                    landmark_sum[1] / accum['count'],
+                    landmark_sum[2] / accum['count']
+                ])
+            
+            hands_output.append({
+                'hand_index': hand_idx,
+                'landmarks': avg_landmarks,  # List of 21 [x, y, z] coordinates
+                'count': accum['count']
+            })
+        
+        if hands_output:
+            result[cluster_id] = {'hands': hands_output}
+    
+    return result
+
+
+def _extract_xyz(embedding_row):
+    """
+    Return the first three dimensions of an embedding vector, padding with 0.0 when needed.
+    """
+    if embedding_row is None:
+        return 0.0, 0.0, 0.0
+    x = float(embedding_row[0]) if len(embedding_row) > 0 else 0.0
+    y = float(embedding_row[1]) if len(embedding_row) > 1 else 0.0
+    z = float(embedding_row[2]) if len(embedding_row) > 2 else 0.0
+    return x, y, z
+
+
+def cluster_features(X, pca_components=6, min_cluster_size=50, min_samples=10):
     """
     Cluster feature vectors using HDBSCAN with PCA dimensionality reduction.
     
@@ -81,7 +195,7 @@ def load_features_from_npz(npz_path):
     }
 
 
-def cluster_segment_features(npz_path, pca_components=20, min_cluster_size=50, min_samples=None, output_path=None):
+def cluster_segment_features(npz_path, pca_components=6, min_cluster_size=50, min_samples=None, output_path=None):
     """
     Cluster features from a single segment.
     
@@ -114,21 +228,34 @@ def cluster_segment_features(npz_path, pca_components=20, min_cluster_size=50, m
     
     labels = cluster_result['labels']
     
-    # Create output with frame information
-    clustered_frames = []
-    for i, (frame_idx, label) in enumerate(zip(frame_indices, labels)):
-        clustered_frames.append({
-            'frame': int(frame_idx),
-            'cluster': int(label),
-            'feature_idx': i
-        })
-    
-    # Load metadata if available
+    # Load per-frame original skeleton landmarks (smoothed but NOT PCA-normalized) if available
+    frame_landmarks_lookup = {}
     metadata_path = npz_path.with_suffix('.json')
     metadata = {}
     if metadata_path.exists():
         with open(metadata_path, 'r') as f:
             metadata = json.load(f)
+        source_file = metadata.get('source_file')
+        # Note: source_file points to normalized JSON, but we want smoothed JSON
+        # For single-segment clustering, this may still use normalized data
+        # Main batch processing uses smoothed data directly
+        frame_landmarks_lookup = load_frame_landmarks(source_file)
+    
+    # Create output with frame information
+    clustered_frames = []
+    for i, (frame_idx, label) in enumerate(zip(frame_indices, labels)):
+        embedding_row = cluster_result['X_reduced'][i]
+        x, y, z = _extract_xyz(embedding_row)
+        landmarks = frame_landmarks_lookup.get(int(frame_idx), [])
+        clustered_frames.append({
+            'frame': int(frame_idx),
+            'cluster': int(label),
+            'feature_idx': i,
+            'x': x,
+            'y': y,
+            'z': z,
+            'hand_landmarks': landmarks
+        })
     
     # Create results dictionary
     results = {
@@ -146,7 +273,8 @@ def cluster_segment_features(npz_path, pca_components=20, min_cluster_size=50, m
             int(cluster): int(np.sum(labels == cluster))
             for cluster in set(labels)
         },
-        'metadata': metadata
+        'metadata': metadata,
+        'cluster_landmarks': summarize_cluster_landmarks(clustered_frames)
     }
     
     # Save results
@@ -175,7 +303,7 @@ def cluster_segment_features(npz_path, pca_components=20, min_cluster_size=50, m
     return results
 
 
-def cluster_multiple_segments(npz_paths, pca_components=20, min_cluster_size=50, min_samples=None, output_path=None):
+def cluster_multiple_segments(npz_paths, pca_components=6, min_cluster_size=50, min_samples=None, output_path=None):
     """
     Cluster features from multiple segments together.
     
@@ -193,9 +321,24 @@ def cluster_multiple_segments(npz_paths, pca_components=20, min_cluster_size=50,
     all_features = []
     all_frame_info = []  # Track which segment/frame each feature came from
     
+    landmarks_cache = {}
+    
     for npz_path in npz_paths:
         npz_path = Path(npz_path)
         feature_data = load_features_from_npz(npz_path)
+        metadata_path = npz_path.with_suffix('.json')
+        source_file = None
+        if metadata_path.exists():
+            with open(metadata_path, 'r') as f:
+                metadata = json.load(f)
+            source_file = metadata.get('source_file')
+        frame_landmarks_lookup = {}
+        if source_file:
+            if source_file in landmarks_cache:
+                frame_landmarks_lookup = landmarks_cache[source_file]
+            else:
+                frame_landmarks_lookup = load_frame_landmarks(source_file)
+                landmarks_cache[source_file] = frame_landmarks_lookup
         
         segment_name = npz_path.stem
         for i, (feature, frame_idx) in enumerate(zip(
@@ -206,7 +349,8 @@ def cluster_multiple_segments(npz_paths, pca_components=20, min_cluster_size=50,
             all_frame_info.append({
                 'segment': segment_name,
                 'frame': int(frame_idx),
-                'feature_idx': len(all_features) - 1
+                'feature_idx': len(all_features) - 1,
+                'hand_landmarks': frame_landmarks_lookup.get(int(frame_idx), [])
             })
     
     if len(all_features) == 0:
@@ -226,7 +370,12 @@ def cluster_multiple_segments(npz_paths, pca_components=20, min_cluster_size=50,
     
     # Add cluster labels to frame info
     for i, label in enumerate(labels):
+        embedding_row = cluster_result['X_reduced'][i]
+        x, y, z = _extract_xyz(embedding_row)
         all_frame_info[i]['cluster'] = int(label)
+        all_frame_info[i]['x'] = x
+        all_frame_info[i]['y'] = y
+        all_frame_info[i]['z'] = z
     
     # Create results
     results = {
@@ -242,7 +391,8 @@ def cluster_multiple_segments(npz_paths, pca_components=20, min_cluster_size=50,
         'cluster_distribution': {
             int(cluster): int(np.sum(labels == cluster))
             for cluster in set(labels)
-        }
+        },
+        'cluster_landmarks': summarize_cluster_landmarks(all_frame_info)
     }
     
     # Save results

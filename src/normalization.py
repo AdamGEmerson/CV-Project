@@ -8,6 +8,24 @@ from pathlib import Path
 import json
 
 
+def _compute_hand_centroid(hand_landmarks):
+    """
+    Compute centroid (mean position) of a hand's landmarks.
+    Returns dict with x/y/z or None if landmarks invalid.
+    """
+    if hand_landmarks is None or len(hand_landmarks) == 0:
+        return None
+    pts = np.array(hand_landmarks, dtype=np.float64)
+    if pts.ndim != 2 or pts.shape[1] != 3:
+        return None
+    centroid = np.mean(pts, axis=0)
+    return {
+        'x': float(centroid[0]),
+        'y': float(centroid[1]),
+        'z': float(centroid[2])
+    }
+
+
 def normalize_landmarks(landmarks, scale_method='palm'):
     """
     Normalize a single hand's landmarks to canonical orientation.
@@ -52,6 +70,8 @@ def normalize_landmarks(landmarks, scale_method='palm'):
     
     # 3. Rotation normalize using PCA
     # PCA will align the hand to principal axes
+    # Note: PCA normalization is used for feature extraction/clustering only.
+    # For visualization, we use the original smoothed skeleton data (before normalization).
     pca = PCA(n_components=3)
     pts_normalized = pca.fit_transform(pts)
     
@@ -113,18 +133,22 @@ def normalize_from_json(json_path, output_path=None, scale_method='palm'):
         
         # Normalize each hand in the frame
         normalized_hands = []
+        hand_centroids = []
         for hand in hands:
             if len(hand) == 0:
                 # No hand detected
                 normalized_hands.append([])
+                hand_centroids.append(None)
             else:
                 normalized_hand = normalize_landmarks(hand, scale_method=scale_method)
                 # Convert back to list of tuples for JSON serialization
                 normalized_hands.append(normalized_hand.tolist())
+                hand_centroids.append(_compute_hand_centroid(normalized_hand))
         
         normalized_landmarks.append({
             'frame': frame_idx,
-            'hands': normalized_hands
+            'hands': normalized_hands,
+            'hand_centroids': hand_centroids
         })
     
     # Save normalized landmarks
