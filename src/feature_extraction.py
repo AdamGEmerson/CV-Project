@@ -134,66 +134,143 @@ def extract_features_from_json(json_path, method='distance_matrix', hand_idx=0, 
     
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     
-    # Save as compressed numpy file
+    # Save as compressed numpy file with metadata included
+    # Store metadata as strings/arrays that numpy can handle
     np.savez_compressed(
         output_path,
         features=features,
         frame_indices=np.array(frame_indices),
-        valid_frames=valid_frames
+        valid_frames=valid_frames,
+        # Store metadata as strings/arrays
+        source_file=np.array([str(json_path)], dtype=object),
+        fps=np.array([fps] if fps is not None else [None], dtype=object),
+        total_frames=np.array([total_frames]),
+        frames_with_features=np.array([len(features)]),
+        scale_method=np.array([scale_method], dtype=object),
+        feature_method=np.array([method], dtype=object),
+        hand_idx=np.array([hand_idx]),
+        feature_dim=np.array([features.shape[1] if len(features) > 0 else 0])
     )
-    
-    # Save metadata as JSON
-    metadata_path = output_path.with_suffix('.json')
-    with open(metadata_path, 'w') as f:
-        json.dump(metadata, f, indent=2)
     
     return {
         'features': features,
         'frame_indices': frame_indices,
         'valid_frames': valid_frames,
         'metadata': metadata,
-        'output_path': str(output_path),
-        'metadata_path': str(metadata_path)
+        'output_path': str(output_path)
     }
 
 
 def extract_all_hands_features(json_path, method='distance_matrix', output_path=None):
     """
-    Extract features for all hands in the sequence.
+    Extract features for all hands in the sequence and save in a single consolidated NPZ file.
     
     Args:
         json_path: Path to normalized landmarks JSON file
         method: Feature extraction method
-        output_path: Base path for output files
+        output_path: Base path for output file (single NPZ file for both hands)
     
     Returns:
-        Dictionary with features for each hand
+        Dictionary with features for each hand and consolidated output path
     """
     json_path = Path(json_path)
     
     if output_path is None:
-        output_path = json_path.parent / f"{json_path.stem}_features_{method}"
+        output_path = json_path.parent / f"{json_path.stem}_features_{method}.npz"
     else:
         output_path = Path(output_path)
+        if not output_path.suffix == '.npz':
+            output_path = Path(str(output_path) + '.npz')
     
-    # Extract features for hand 0
+    # Extract features for both hands
     hand0_result = extract_features_from_json(
         json_path,
         method=method,
         hand_idx=0,
-        output_path=f"{output_path}_hand0.npz"
+        output_path=None  # Don't save individual files
     )
     
-    # Extract features for hand 1 (if present)
     hand1_result = extract_features_from_json(
         json_path,
         method=method,
         hand_idx=1,
-        output_path=f"{output_path}_hand1.npz"
+        output_path=None  # Don't save individual files
+    )
+    
+    # Load normalized landmarks for inter-hand distance calculation
+    with open(json_path, 'r') as f:
+        landmarks_data = json.load(f)
+    
+    # Compute inter-hand distances for common frames
+    frame_to_landmarks = {}
+    for entry in landmarks_data.get('landmarks', []):
+        frame_idx = entry['frame']
+        hands = entry['hands']
+        if len(hands) >= 2 and len(hands[0]) > 0 and len(hands[1]) > 0:
+            frame_to_landmarks[frame_idx] = (np.array(hands[0]), np.array(hands[1]))
+    
+    # Get common frames
+    hand0_frames = set(hand0_result['frame_indices'])
+    hand1_frames = set(hand1_result['frame_indices'])
+    common_frames = sorted(list(hand0_frames & hand1_frames))
+    
+    # Compute inter-hand distances for common frames
+    inter_hand_features = []
+    for frame in common_frames:
+        if frame in frame_to_landmarks:
+            hand0_lm = frame_to_landmarks[frame][0]
+            hand1_lm = frame_to_landmarks[frame][1]
+            D_inter = np.linalg.norm(hand0_lm[:, None, :] - hand1_lm[None, :, :], axis=-1)
+            inter_hand_features.append(D_inter.flatten())
+        else:
+            inter_hand_features.append(np.zeros(441))
+    
+    # Create mapping for common frames
+    hand0_frame_to_idx = {frame: idx for idx, frame in enumerate(hand0_result['frame_indices'])}
+    hand1_frame_to_idx = {frame: idx for idx, frame in enumerate(hand1_result['frame_indices'])}
+    
+    # Combine features for common frames
+    combined_features = []
+    for frame in common_frames:
+        h0_idx = hand0_frame_to_idx[frame]
+        h1_idx = hand1_frame_to_idx[frame]
+        combined = np.concatenate([
+            hand0_result['features'][h0_idx],
+            hand1_result['features'][h1_idx],
+            inter_hand_features[common_frames.index(frame)]
+        ])
+        combined_features.append(combined)
+    
+    # Save consolidated file with all data
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    
+    # Get metadata from hand0 result
+    metadata = hand0_result['metadata']
+    
+    np.savez_compressed(
+        output_path,
+        # Individual hand features
+        hand0_features=hand0_result['features'],
+        hand1_features=hand1_result['features'],
+        hand0_frame_indices=np.array(hand0_result['frame_indices']),
+        hand1_frame_indices=np.array(hand1_result['frame_indices']),
+        # Combined features (for clustering)
+        combined_features=np.array(combined_features),
+        common_frames=np.array(common_frames),
+        # Metadata
+        source_file=np.array([str(json_path)], dtype=object),
+        fps=np.array([metadata.get('fps')], dtype=object),
+        total_frames=np.array([metadata.get('total_frames')]),
+        scale_method=np.array([metadata.get('scale_method')], dtype=object),
+        feature_method=np.array([method], dtype=object),
+        feature_dim=np.array([len(combined_features[0]) if len(combined_features) > 0 else 0])
     )
     
     return {
         'hand0': hand0_result,
-        'hand1': hand1_result
+        'hand1': hand1_result,
+        'combined_features': np.array(combined_features),
+        'common_frames': common_frames,
+        'output_path': str(output_path)
     }
 

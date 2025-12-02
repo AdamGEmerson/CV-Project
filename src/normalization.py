@@ -8,24 +8,6 @@ from pathlib import Path
 import json
 
 
-def _compute_hand_centroid(hand_landmarks):
-    """
-    Compute centroid (mean position) of a hand's landmarks.
-    Returns dict with x/y/z or None if landmarks invalid.
-    """
-    if hand_landmarks is None or len(hand_landmarks) == 0:
-        return None
-    pts = np.array(hand_landmarks, dtype=np.float64)
-    if pts.ndim != 2 or pts.shape[1] != 3:
-        return None
-    centroid = np.mean(pts, axis=0)
-    return {
-        'x': float(centroid[0]),
-        'y': float(centroid[1]),
-        'z': float(centroid[2])
-    }
-
-
 def normalize_landmarks(landmarks, scale_method='palm'):
     """
     Normalize a single hand's landmarks to canonical orientation.
@@ -103,9 +85,88 @@ def normalize_landmark_sequence(landmarks_sequence, scale_method='palm'):
     return normalized_sequence
 
 
+def normalize_hands_relative(left_hand, right_hand, scale_method='palm'):
+    """
+    Normalize hands with left wrist as global anchor point, preserving relative orientation.
+    - Left hand: normalized to origin (wrist at 0,0,0)
+    - Right hand: normalized relative to left wrist position
+    - Both hands use the same scale and rotation to preserve relative orientation
+    
+    Args:
+        left_hand: Array of shape (21, 3) with left hand landmarks, or None
+        right_hand: Array of shape (21, 3) with right hand landmarks, or None
+        scale_method: 'palm' or 'bbox'
+    
+    Returns:
+        Tuple of (normalized_left_hand, normalized_right_hand)
+        Each is shape (21, 3) or None if hand not present
+    """
+    normalized_left = None
+    normalized_right = None
+    
+    # If both hands are present, normalize together to preserve relative orientation
+    if left_hand is not None and len(left_hand) > 0 and right_hand is not None and len(right_hand) > 0:
+        left_pts = np.array(left_hand, dtype=np.float64)
+        right_pts = np.array(right_hand, dtype=np.float64)
+        
+        if left_pts.shape == (21, 3) and right_pts.shape == (21, 3):
+            # Get left wrist position (anchor point)
+            left_wrist_pos = left_pts[0].copy()
+            
+            # Center left hand at origin
+            left_centered = left_pts - left_wrist_pos
+            
+            # Translate right hand relative to left wrist
+            right_relative = right_pts - left_wrist_pos
+            
+            # Calculate scale from left hand (to preserve relative sizes)
+            if scale_method == 'palm':
+                scale = np.linalg.norm(left_centered[9] - left_centered[0])  # Wrist to middle MCP
+            elif scale_method == 'bbox':
+                bbox_min = left_centered.min(axis=0)
+                bbox_max = left_centered.max(axis=0)
+                scale = np.linalg.norm(bbox_max - bbox_min)
+            else:
+                raise ValueError(f"Unknown scale_method: {scale_method}")
+            
+            if scale < 1e-6:
+                # Fallback to independent normalization
+                normalized_left = normalize_landmarks(left_pts, scale_method=scale_method)
+                normalized_right = normalize_landmarks(right_pts - left_wrist_pos, scale_method=scale_method)
+            else:
+                # Apply same scale to both hands
+                left_scaled = left_centered / scale
+                right_scaled = right_relative / scale
+                
+                # Apply PCA rotation to left hand, then apply same rotation to right hand
+                # This preserves relative orientation
+                pca = PCA(n_components=3)
+                left_normalized = pca.fit_transform(left_scaled)
+                # Apply the same PCA transformation to right hand
+                right_normalized = pca.transform(right_scaled)
+                
+                normalized_left = left_normalized
+                normalized_right = right_normalized
+    
+    # If only left hand is present
+    elif left_hand is not None and len(left_hand) > 0:
+        left_pts = np.array(left_hand, dtype=np.float64)
+        if left_pts.shape == (21, 3):
+            normalized_left = normalize_landmarks(left_pts, scale_method=scale_method)
+    
+    # If only right hand is present
+    elif right_hand is not None and len(right_hand) > 0:
+        right_pts = np.array(right_hand, dtype=np.float64)
+        if right_pts.shape == (21, 3):
+            normalized_right = normalize_landmarks(right_pts, scale_method=scale_method)
+    
+    return normalized_left, normalized_right
+
+
 def normalize_from_json(json_path, output_path=None, scale_method='palm'):
     """
     Load landmarks from JSON file, normalize them, and save.
+    Uses new strategy: left wrist as anchor, right hand normalized relative to left.
     
     Args:
         json_path: Path to JSON file with landmarks (from hand_tracking.py)
@@ -130,25 +191,60 @@ def normalize_from_json(json_path, output_path=None, scale_method='palm'):
     for frame_data in data['landmarks']:
         frame_idx = frame_data['frame']
         hands = frame_data['hands']
+        hand_labels = frame_data.get('hand_labels', [])
         
-        # Normalize each hand in the frame
-        normalized_hands = []
-        hand_centroids = []
-        for hand in hands:
+        # Identify left and right hands
+        left_hand = None
+        right_hand = None
+        
+        for hand_idx, hand in enumerate(hands):
             if len(hand) == 0:
-                # No hand detected
-                normalized_hands.append([])
-                hand_centroids.append(None)
+                continue
+            
+            # Determine hand type from labels or position
+            if hand_idx < len(hand_labels):
+                hand_type = hand_labels[hand_idx].lower()
             else:
-                normalized_hand = normalize_landmarks(hand, scale_method=scale_method)
-                # Convert back to list of tuples for JSON serialization
-                normalized_hands.append(normalized_hand.tolist())
-                hand_centroids.append(_compute_hand_centroid(normalized_hand))
+                # Fallback: classify by position (left hand typically on left side)
+                wrist_x = hand[0][0] if hand else 0.5
+                hand_type = 'left' if wrist_x < 0.5 else 'right'
+            
+            if hand_type == 'left':
+                left_hand = hand
+            elif hand_type == 'right':
+                right_hand = hand
+        
+        # Normalize hands relative to each other
+        normalized_left, normalized_right = normalize_hands_relative(
+            left_hand, right_hand, scale_method=scale_method
+        )
+        
+        # Build normalized hands list preserving order
+        normalized_hands = []
+        
+        for hand_idx, hand in enumerate(hands):
+            if len(hand) == 0:
+                normalized_hands.append([])
+            else:
+                # Determine which normalized hand to use
+                if hand_idx < len(hand_labels):
+                    hand_type = hand_labels[hand_idx].lower()
+                else:
+                    wrist_x = hand[0][0] if hand else 0.5
+                    hand_type = 'left' if wrist_x < 0.5 else 'right'
+                
+                if hand_type == 'left' and normalized_left is not None:
+                    normalized_hands.append(normalized_left.tolist())
+                elif hand_type == 'right' and normalized_right is not None:
+                    normalized_hands.append(normalized_right.tolist())
+                else:
+                    # Fallback: normalize independently
+                    normalized_hand = normalize_landmarks(hand, scale_method=scale_method)
+                    normalized_hands.append(normalized_hand.tolist())
         
         normalized_landmarks.append({
             'frame': frame_idx,
-            'hands': normalized_hands,
-            'hand_centroids': hand_centroids
+            'hands': normalized_hands
         })
     
     # Save normalized landmarks
@@ -161,6 +257,7 @@ def normalize_from_json(json_path, output_path=None, scale_method='palm'):
         'fps': fps,
         'total_frames': total_frames,
         'scale_method': scale_method,
+        'normalization_strategy': 'left_wrist_anchor',
         'landmarks': normalized_landmarks
     }
     

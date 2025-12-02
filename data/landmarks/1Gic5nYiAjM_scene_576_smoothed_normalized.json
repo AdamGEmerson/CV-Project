@@ -1,0 +1,228 @@
+{
+  "fps": 25.0,
+  "total_frames": 55,
+  "scale_method": "palm",
+  "normalization_strategy": "left_wrist_anchor",
+  "landmarks": [
+    {
+      "frame": 0,
+      "hands": []
+    },
+    {
+      "frame": 1,
+      "hands": []
+    },
+    {
+      "frame": 2,
+      "hands": []
+    },
+    {
+      "frame": 3,
+      "hands": []
+    },
+    {
+      "frame": 4,
+      "hands": []
+    },
+    {
+      "frame": 5,
+      "hands": []
+    },
+    {
+      "frame": 6,
+      "hands": []
+    },
+    {
+      "frame": 7,
+      "hands": []
+    },
+    {
+      "frame": 8,
+      "hands": []
+    },
+    {
+      "frame": 9,
+      "hands": []
+    },
+    {
+      "frame": 10,
+      "hands": []
+    },
+    {
+      "frame": 11,
+      "hands": []
+    },
+    {
+      "frame": 12,
+      "hands": []
+    },
+    {
+      "frame": 13,
+      "hands": []
+    },
+    {
+      "frame": 14,
+      "hands": []
+    },
+    {
+      "frame": 15,
+      "hands": []
+    },
+    {
+      "frame": 16,
+      "hands": []
+    },
+    {
+      "frame": 17,
+      "hands": []
+    },
+    {
+      "frame": 18,
+      "hands": []
+    },
+    {
+      "frame": 19,
+      "hands": []
+    },
+    {
+      "frame": 20,
+      "hands": []
+    },
+    {
+      "frame": 21,
+      "hands": []
+    },
+    {
+      "frame": 22,
+      "hands": []
+    },
+    {
+      "frame": 23,
+      "hands": []
+    },
+    {
+      "frame": 24,
+      "hands": []
+    },
+    {
+      "frame": 25,
+      "hands": []
+    },
+    {
+      "frame": 26,
+      "hands": []
+    },
+    {
+      "frame": 27,
+      "hands": []
+    },
+    {
+      "frame": 28,
+      "hands": []
+    },
+    {
+      "frame": 29,
+      "hands": []
+    },
+    {
+      "frame": 30,
+      "hands": []
+    },
+    {
+      "frame": 31,
+      "hands": []
+    },
+    {
+      "frame": 32,
+      "hands": []
+    },
+    {
+      "frame": 33,
+      "hands": []
+    },
+    {
+      "frame": 34,
+      "hands": []
+    },
+    {
+      "frame": 35,
+      "hands": []
+    },
+    {
+      "frame": 36,
+      "hands": []
+    },
+    {
+      "frame": 37,
+      "hands": []
+    },
+    {
+      "frame": 38,
+      "hands": []
+    },
+    {
+      "frame": 39,
+      "hands": []
+    },
+    {
+      "frame": 40,
+      "hands": []
+    },
+    {
+      "frame": 41,
+      "hands": []
+    },
+    {
+      "frame": 42,
+      "hands": []
+    },
+    {
+      "frame": 43,
+      "hands": []
+    },
+    {
+      "frame": 44,
+      "hands": []
+    },
+    {
+      "frame": 45,
+      "hands": []
+    },
+    {
+      "frame": 46,
+      "hands": []
+    },
+    {
+      "frame": 47,
+      "hands": []
+    },
+    {
+      "frame": 48,
+      "hands": []
+    },
+    {
+      "frame": 49,
+      "hands": []
+    },
+    {
+      "frame": 50,
+      "hands": []
+    },
+    {
+      "frame": 51,
+      "hands": []
+    },
+    {
+      "frame": 52,
+      "hands": []
+    },
+    {
+      "frame": 53,
+      "hands": []
+    },
+    {
+      "frame": 54,
+      "hands": []
+    }
+  ]
+}

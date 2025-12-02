@@ -1,5 +1,6 @@
 .venv/
-videos/
+/videos/
+/data/clips/
 *.pyc
 .env
 .DS_Store

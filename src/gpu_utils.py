@@ -7,6 +7,9 @@ is properly compiled and available.
 """
 import os
 import subprocess
+import sys
+import warnings
+from contextlib import contextmanager
 
 
 def check_nvidia_gpu():
@@ -45,11 +48,44 @@ def check_gpu_available():
     return False, "CPU mode - GPU not detected. MediaPipe will use CPU inference."
 
 
+def suppress_mediapipe_warnings():
+    """
+    Suppress MediaPipe's internal warnings and info messages.
+    MediaPipe uses glog (Google Logging) which outputs to stderr.
+    """
+    # Set environment variable to reduce MediaPipe logging verbosity
+    # GLOG_minloglevel: 0=INFO, 1=WARNING, 2=ERROR, 3=FATAL
+    # Set to 3 to suppress warnings (only show fatal errors)
+    os.environ['GLOG_minloglevel'] = '3'
+    
+    # Also suppress Python warnings from MediaPipe
+    warnings.filterwarnings('ignore', category=UserWarning, module='mediapipe')
+
+
+@contextmanager
+def suppress_stderr():
+    """
+    Context manager to temporarily suppress stderr output.
+    Useful for suppressing MediaPipe's verbose logging during initialization.
+    """
+    with open(os.devnull, 'w') as devnull:
+        old_stderr = sys.stderr
+        sys.stderr = devnull
+        try:
+            yield
+        finally:
+            sys.stderr = old_stderr
+
+
 def setup_gpu_environment():
     """
     Set up environment variables for GPU acceleration.
     These help TensorFlow Lite use GPU if available.
+    Also suppresses MediaPipe warnings.
     """
+    # Suppress MediaPipe warnings
+    suppress_mediapipe_warnings()
+    
     # Enable GPU memory growth (prevents TensorFlow from allocating all GPU memory)
     os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
     

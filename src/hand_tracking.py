@@ -1,6 +1,11 @@
 """
 Extract hand landmarks from video segments.
 """
+import os
+# Suppress MediaPipe warnings by setting environment variable before import
+# This must be set before MediaPipe is imported
+os.environ['GLOG_minloglevel'] = '3'  # 0=INFO, 1=WARNING, 2=ERROR, 3=FATAL (set to 3 to suppress warnings)
+
 import cv2
 import mediapipe as mp
 from mediapipe.framework.formats import landmark_pb2
@@ -9,7 +14,7 @@ import json
 from pathlib import Path
 import time
 from scipy.signal import savgol_filter
-from src.gpu_utils import setup_gpu_environment
+# GPU utilities removed - using CPU-only processing
 
 
 def extract_landmarks(video_path, use_gpu=True, save_format='json'):
@@ -26,52 +31,110 @@ def extract_landmarks(video_path, use_gpu=True, save_format='json'):
                   where hands_data is a list of hand landmarks
                   Each hand is a list of 21 (x, y, z) tuples
     """
-    # Set up GPU environment if requested
-    if use_gpu:
-        setup_gpu_environment()
+    # Suppress MediaPipe warnings during initialization
+    # IMPORTANT: Each thread must create its own MediaPipe Hands instance
+    # MediaPipe objects are NOT thread-safe and should not be shared between threads
+    from src.gpu_utils import suppress_stderr
+    mp_hands = None
+    try:
+        with suppress_stderr():
+            mp_hands = mp.solutions.hands.Hands(
+                static_image_mode=False,
+                max_num_hands=2,
+                min_detection_confidence=0.5,
+                min_tracking_confidence=0.5,
+                model_complexity=1
+            )
+    except Exception as e:
+        raise RuntimeError(f"Failed to initialize MediaPipe Hands: {e}")
     
-    mp_hands = mp.solutions.hands.Hands(
-        static_image_mode=False,
-        max_num_hands=2,
-        min_detection_confidence=0.5,
-        min_tracking_confidence=0.5,
-        model_complexity=1
-    )
+    if mp_hands is None:
+        raise RuntimeError("MediaPipe Hands initialization returned None")
 
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        raise ValueError(f"Could not open video file: {video_path}")
-    
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    
-    landmarks = []
-    frame_idx = 0
-    start_time = time.time()
-    last_update_time = start_time
-    update_interval = 1.0
-
-    print(f"  Processing {total_frames} frames @ {fps:.2f} FPS...")
-
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-
-        results = mp_hands.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+    cap = None
+    try:
+        # Open video file with retry logic for thread safety
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                cap = cv2.VideoCapture(str(video_path))
+                if cap.isOpened():
+                    break
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    raise ValueError(f"Could not open video file after {max_retries} attempts: {video_path}")
+                time.sleep(0.1 * (attempt + 1))  # Exponential backoff
         
-        if results.multi_hand_landmarks:
-            hands = []
-            for hand_landmarks in results.multi_hand_landmarks:
-                # Extract 21 landmarks: (x, y, z) coordinates
-                hand_points = [(lm.x, lm.y, lm.z) for lm in hand_landmarks.landmark]
-                hands.append(hand_points)
-            landmarks.append((frame_idx, hands))
-        else:
-            # No hands detected in this frame
-            landmarks.append((frame_idx, []))
+        if cap is None or not cap.isOpened():
+            raise ValueError(f"Could not open video file: {video_path}")
+        
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        
+        landmarks = []
+        frame_idx = 0
+        start_time = time.time()
+        last_update_time = start_time
+        update_interval = 1.0
 
-        frame_idx += 1
+        print(f"  Processing {total_frames} frames @ {fps:.2f} FPS...")
+
+        while True:
+            try:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+            except Exception as e:
+                # Handle I/O errors gracefully
+                print(f"  [WARN] Error reading frame {frame_idx}: {e}")
+                break
+
+            try:
+                results = mp_hands.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+            except Exception as e:
+                print(f"  [WARN] Error processing frame {frame_idx}: {e}")
+                landmarks.append((frame_idx, [], []))
+                frame_idx += 1
+                continue
+            
+            if results.multi_hand_landmarks:
+                hands = []
+                hand_labels = []  # Store handedness labels
+                
+                # Extract handedness information from MediaPipe
+                # results.multi_handedness is a list of ClassificationList objects
+                # Each ClassificationList contains Classification objects with label and score
+                try:
+                    handedness_list = results.multi_handedness if hasattr(results, 'multi_handedness') and results.multi_handedness else []
+                except (AttributeError, TypeError):
+                    handedness_list = []
+                
+                for idx, hand_landmarks in enumerate(results.multi_hand_landmarks):
+                    # Extract 21 landmarks: (x, y, z) coordinates
+                    hand_points = [(lm.x, lm.y, lm.z) for lm in hand_landmarks.landmark]
+                    hands.append(hand_points)
+                    
+                    # Extract handedness label
+                    try:
+                        if idx < len(handedness_list) and len(handedness_list[idx].classification) > 0:
+                            classification = handedness_list[idx].classification[0]
+                            hand_labels.append(classification.label.lower())  # 'Left' or 'Right'
+                        else:
+                            # Fallback: try to infer from position (left hand typically on left side of image)
+                            # This is a heuristic fallback
+                            wrist_x = hand_points[0][0]  # Wrist is landmark 0, x coordinate
+                            hand_labels.append('left' if wrist_x < 0.5 else 'right')
+                    except (IndexError, AttributeError, TypeError):
+                        # Fallback if handedness extraction fails
+                        wrist_x = hand_points[0][0] if hand_points else 0.5
+                        hand_labels.append('left' if wrist_x < 0.5 else 'right')
+                
+                landmarks.append((frame_idx, hands, hand_labels))
+            else:
+                # No hands detected in this frame
+                landmarks.append((frame_idx, [], []))
+            
+            frame_idx += 1
         
         # Update progress periodically
         current_time = time.time()
@@ -87,17 +150,26 @@ def extract_landmarks(video_path, use_gpu=True, save_format='json'):
             else:
                 eta_str = ""
             
-            frames_with_hands = sum(1 for _, hands in landmarks if hands)
+            frames_with_hands = sum(1 for entry in landmarks if (len(entry) >= 2 and entry[1]))
             print(f"\r    Progress: {frame_idx}/{total_frames} ({progress:.1f}%) | "
                   f"Speed: {fps_processing:.1f} fps | Frames with hands: {frames_with_hands}{eta_str}",
                   end='', flush=True)
             last_update_time = current_time
-
-    cap.release()
-    mp_hands.close()
+    
+    finally:
+        # Always release VideoCapture, even if there was an error
+        if cap is not None:
+            try:
+                cap.release()
+            except Exception:
+                pass  # Ignore errors during cleanup
+        try:
+            mp_hands.close()
+        except Exception:
+            pass  # Ignore errors during cleanup
     
     elapsed_total = time.time() - start_time
-    frames_with_hands = sum(1 for _, hands in landmarks if hands)
+    frames_with_hands = sum(1 for entry in landmarks if (len(entry) >= 2 and entry[1]))
     print(f"\r    Progress: {frame_idx}/{total_frames} (100.0%) | "
           f"Completed in {elapsed_total:.1f}s | Frames with hands: {frames_with_hands}",
           flush=True)
@@ -119,16 +191,26 @@ def save_landmarks(landmarks, fps, output_path, format='json'):
     
     if format == 'json':
         # Convert to JSON-serializable format
+        landmarks_list = []
+        for entry in landmarks:
+            if len(entry) == 3:
+                frame_idx, hands, hand_labels = entry
+            elif len(entry) == 2:
+                frame_idx, hands = entry
+                hand_labels = ['unknown'] * len(hands)  # Fallback for old data
+            else:
+                continue
+            
+            landmarks_list.append({
+                "frame": frame_idx,
+                "hands": hands,  # List of hands, each hand is list of 21 (x,y,z) tuples
+                "hand_labels": hand_labels  # List of 'left' or 'right' labels
+            })
+        
         landmarks_data = {
             "fps": fps,
             "total_frames": len(landmarks),
-            "landmarks": [
-                {
-                    "frame": frame_idx,
-                    "hands": hands  # List of hands, each hand is list of 21 (x,y,z) tuples
-                }
-                for frame_idx, hands in landmarks
-            ]
+            "landmarks": landmarks_list
         }
         
         with open(output_path, 'w') as f:
@@ -141,7 +223,11 @@ def save_landmarks(landmarks, fps, output_path, format='json'):
         num_frames = len(landmarks)
         landmarks_array = np.full((num_frames, max_hands, 21, 3), np.nan)
         
-        for frame_idx, hands in landmarks:
+        for entry in landmarks:
+            if len(entry) >= 2:
+                frame_idx, hands = entry[0], entry[1]
+            else:
+                continue
             for hand_idx, hand_points in enumerate(hands[:max_hands]):
                 landmarks_array[frame_idx, hand_idx] = np.array(hand_points)
         
@@ -221,17 +307,16 @@ def create_preview_image(video_path, output_path=None, frame_idx=None, use_gpu=T
     
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     
-    # Set up MediaPipe
-    if use_gpu:
-        setup_gpu_environment()
-    
-    mp_hands = mp.solutions.hands.Hands(
-        static_image_mode=False,
-        max_num_hands=2,
-        min_detection_confidence=0.5,
-        min_tracking_confidence=0.5,
-        model_complexity=1
-    )
+    # Set up MediaPipe (suppress warnings)
+    from src.gpu_utils import suppress_stderr
+    with suppress_stderr():
+        mp_hands = mp.solutions.hands.Hands(
+            static_image_mode=False,
+            max_num_hands=2,
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5,
+            model_complexity=1
+        )
     
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
@@ -351,15 +436,16 @@ def smooth_landmarks(landmarks, window_length=7, polyorder=3):
     Apply Savitzky-Golay filter to smooth hand landmarks temporally.
     
     This function properly handles missing hands by:
-    1. Classifying each hand as left or right (not using raw index order)
+    1. Using MediaPipe handedness labels when available, falling back to position-based classification
     2. Maintaining separate smoothing buffers for left and right hands
     3. Clearing buffers when hands disappear (output NaNs)
     4. Restarting smoothing fresh when hands reappear (no drift)
     
     Args:
-        landmarks: List of tuples (frame_idx, hands_data)
+        landmarks: List of tuples (frame_idx, hands_data, hand_labels) or (frame_idx, hands_data)
                   where hands_data is a list of hand landmarks
                   Each hand is a list of 21 (x, y, z) tuples
+                  hand_labels is a list of 'left' or 'right' strings (optional)
         window_length: Length of the filter window (must be odd, default=7)
         polyorder: Order of the polynomial used to fit samples (default=3)
     
@@ -388,11 +474,24 @@ def smooth_landmarks(landmarks, window_length=7, polyorder=3):
     # Step 1: For each frame, determine {Left hand, Right hand, Missing}
     # Store as: frame_idx -> {'left': hand_points or None, 'right': hand_points or None}
     frame_hands = {}
-    for frame_idx, (orig_frame_idx, hands) in enumerate(landmarks):
+    for frame_idx, entry in enumerate(landmarks):
         frame_hands[frame_idx] = {'left': None, 'right': None}
         
-        for hand_points in hands:
-            hand_type = _classify_hand(hand_points)
+        if len(entry) == 3:
+            orig_frame_idx, hands, hand_labels = entry
+        elif len(entry) == 2:
+            orig_frame_idx, hands = entry
+            hand_labels = []
+        else:
+            continue
+        
+        for hand_idx, hand_points in enumerate(hands):
+            # Use MediaPipe handedness if available, otherwise fall back to position-based classification
+            if hand_idx < len(hand_labels) and hand_labels[hand_idx] in ['left', 'right']:
+                hand_type = hand_labels[hand_idx]
+            else:
+                hand_type = _classify_hand(hand_points)
+            
             if hand_type:
                 frame_hands[frame_idx][hand_type] = hand_points
     
@@ -470,13 +569,34 @@ def smooth_landmarks(landmarks, window_length=7, polyorder=3):
     
     # Step 3 & 4: Convert back to original format
     # When hand is missing, it won't appear in the output (empty list)
-    for frame_idx, (orig_frame_idx, _) in enumerate(landmarks):
+    smoothed_landmarks = []
+    for frame_idx, entry in enumerate(landmarks):
+        if len(entry) == 3:
+            orig_frame_idx, _, hand_labels = entry
+        elif len(entry) == 2:
+            orig_frame_idx, _ = entry
+            hand_labels = []
+        else:
+            continue
+        
         hands = []
+        labels = []
         for hand_type in ['left', 'right']:
             hand_points = frame_hands[frame_idx][hand_type]
             if hand_points is not None:
                 hands.append(hand_points)
-        smoothed_landmarks.append((orig_frame_idx, hands))
+                labels.append(hand_type)
+        
+        # Preserve hand_labels if they were in the original data
+        if hand_labels:
+            # Try to match labels to hands based on type
+            output_labels = []
+            for hand_type in ['left', 'right']:
+                if frame_hands[frame_idx][hand_type] is not None:
+                    output_labels.append(hand_type)
+            smoothed_landmarks.append((orig_frame_idx, hands, output_labels))
+        else:
+            smoothed_landmarks.append((orig_frame_idx, hands))
     
     return smoothed_landmarks
 
@@ -499,17 +619,16 @@ def create_landmark_video(video_path, output_path=None, use_gpu=True):
     
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     
-    # Set up MediaPipe
-    if use_gpu:
-        setup_gpu_environment()
-    
-    mp_hands = mp.solutions.hands.Hands(
-        static_image_mode=False,
-        max_num_hands=2,
-        min_detection_confidence=0.5,
-        min_tracking_confidence=0.5,
-        model_complexity=1
-    )
+    # Set up MediaPipe (suppress warnings)
+    from src.gpu_utils import suppress_stderr
+    with suppress_stderr():
+        mp_hands = mp.solutions.hands.Hands(
+            static_image_mode=False,
+            max_num_hands=2,
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5,
+            model_complexity=1
+        )
     
     mp_drawing = mp.solutions.drawing_utils
     mp_drawing_styles = mp.solutions.drawing_styles

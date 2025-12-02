@@ -1,3 +1,8 @@
+import os
+# Suppress MediaPipe warnings by setting environment variable before import
+# Note: Some warnings may still appear as MediaPipe's C++ backend writes directly to stderr
+os.environ['GLOG_minloglevel'] = '3'  # 0=INFO, 1=WARNING, 2=ERROR, 3=FATAL (set to 3 to suppress warnings)
+
 import cv2
 import mediapipe as mp
 from pathlib import Path
@@ -22,7 +27,7 @@ def segment_by_hand_presence(video_path, min_active_frames=15, use_gpu=True):
         segments: List of tuples (start_frame, end_frame)
         fps: Frames per second of the video
     """
-    # Set up GPU environment if requested
+    # Set up GPU environment if requested (also suppresses warnings)
     if use_gpu:
         gpu_available, gpu_status = setup_gpu_environment()
         print(f"GPU Status: {gpu_status}")
@@ -32,16 +37,21 @@ def segment_by_hand_presence(video_path, min_active_frames=15, use_gpu=True):
             print("For full GPU acceleration, consider using MediaPipe C++ API.")
     else:
         gpu_available = False
+        from src.gpu_utils import suppress_mediapipe_warnings
+        suppress_mediapipe_warnings()
     
     # Use higher model complexity for better accuracy (can be slower)
     # model_complexity: 0=fastest, 1=balanced, 2=most accurate
-    mp_hands = mp.solutions.hands.Hands(
-        static_image_mode=False,
-        max_num_hands=2,
-        min_detection_confidence=0.5,
-        min_tracking_confidence=0.5,
-        model_complexity=1  # Balanced mode - good accuracy/speed tradeoff
-    )
+    # Suppress MediaPipe warnings during initialization
+    from src.gpu_utils import suppress_stderr
+    with suppress_stderr():
+        mp_hands = mp.solutions.hands.Hands(
+            static_image_mode=False,
+            max_num_hands=2,
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5,
+            model_complexity=1  # Balanced mode - good accuracy/speed tradeoff
+        )
     
 
     # Try to use GPU-accelerated video backend if available

@@ -26,7 +26,11 @@ def load_landmarks_from_json(json_path):
     for entry in data.get('landmarks', []):
         frame_idx = entry['frame']
         hands = entry['hands']
-        landmarks_list.append((frame_idx, hands))
+        hand_labels = entry.get('hand_labels', [])
+        if hand_labels:
+            landmarks_list.append((frame_idx, hands, hand_labels))
+        else:
+            landmarks_list.append((frame_idx, hands))
     
     return landmarks_list, fps
 
@@ -47,7 +51,7 @@ def main():
     print(f"Loaded {len(landmarks)} frames @ {fps:.2f} FPS")
     
     # Count frames with hands
-    frames_with_hands = sum(1 for _, hands in landmarks if hands)
+    frames_with_hands = sum(1 for entry in landmarks if (len(entry) >= 2 and entry[1]))
     print(f"Frames with hands: {frames_with_hands}")
     print()
     

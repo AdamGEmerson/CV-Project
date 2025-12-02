@@ -1,0 +1,341 @@
+{
+  "fps": 29.97002997002997,
+  "total_frames": 67,
+  "landmarks": [
+    {
+      "frame": 0,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 1,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 2,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 3,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 4,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 5,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 6,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 7,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 8,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 9,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 10,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 11,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 12,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 13,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 14,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 15,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 16,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 17,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 18,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 19,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 20,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 21,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 22,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 23,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 24,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 25,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 26,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 27,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 28,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 29,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 30,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 31,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 32,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 33,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 34,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 35,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 36,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 37,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 38,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 39,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 40,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 41,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 42,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 43,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 44,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 45,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 46,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 47,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 48,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 49,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 50,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 51,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 52,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 53,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 54,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 55,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 56,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 57,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 58,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 59,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 60,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 61,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 62,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 63,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 64,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 65,
+      "hands": [],
+      "hand_labels": []
+    },
+    {
+      "frame": 66,
+      "hands": [],
+      "hand_labels": []
+    }
+  ]
+}

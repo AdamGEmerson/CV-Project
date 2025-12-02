@@ -122,7 +122,7 @@ def _extract_xyz(embedding_row):
     return x, y, z
 
 
-def cluster_features(X, pca_components=6, min_cluster_size=50, min_samples=10):
+def cluster_features(X, pca_components=11, min_cluster_size=40, min_samples=15, random_state=None):
     """
     Cluster feature vectors using HDBSCAN with PCA dimensionality reduction.
     
@@ -144,7 +144,7 @@ def cluster_features(X, pca_components=6, min_cluster_size=50, min_samples=10):
     
     # Apply PCA for dimensionality reduction
     if X.shape[1] > pca_components:
-        pca = PCA(n_components=pca_components)
+        pca = PCA(n_components=pca_components, random_state=random_state)
         X_reduced = pca.fit_transform(X)
     else:
         # If features already have fewer dimensions, skip PCA
@@ -176,26 +176,70 @@ def cluster_features(X, pca_components=6, min_cluster_size=50, min_samples=10):
 
 def load_features_from_npz(npz_path):
     """
-    Load features from a .npz file.
+    Load features from a .npz file (supports both old format and new consolidated format).
     
     Args:
         npz_path: Path to .npz file
     
     Returns:
-        Dictionary with features, frame_indices, and valid_frames
+        Dictionary with features, frame_indices, valid_frames, and metadata
     """
     npz_path = Path(npz_path)
     
-    data = np.load(npz_path)
+    data = np.load(npz_path, allow_pickle=True)
     
-    return {
-        'features': data['features'],
-        'frame_indices': data['frame_indices'],
-        'valid_frames': data['valid_frames']
-    }
+    # Check if this is a consolidated file (has combined_features)
+    if 'combined_features' in data:
+        # New consolidated format
+        return {
+            'features': data['combined_features'],
+            'frame_indices': data['common_frames'],
+            'valid_frames': np.ones(len(data['common_frames']), dtype=bool),
+            'hand0_features': data['hand0_features'],
+            'hand1_features': data['hand1_features'],
+            'hand0_frame_indices': data['hand0_frame_indices'],
+            'hand1_frame_indices': data['hand1_frame_indices'],
+            'metadata': {
+                'source_file': str(data['source_file'][0]) if 'source_file' in data else None,
+                'fps': float(data['fps'][0]) if 'fps' in data and data['fps'][0] is not None else None,
+                'total_frames': int(data['total_frames'][0]) if 'total_frames' in data else 0,
+                'scale_method': str(data['scale_method'][0]) if 'scale_method' in data else None,
+                'feature_method': str(data['feature_method'][0]) if 'feature_method' in data else None,
+                'feature_dim': int(data['feature_dim'][0]) if 'feature_dim' in data else 0
+            }
+        }
+    else:
+        # Old format (individual hand files)
+        result = {
+            'features': data['features'],
+            'frame_indices': data['frame_indices'],
+            'valid_frames': data['valid_frames']
+        }
+        
+        # Try to load metadata from NPZ if available
+        if 'source_file' in data:
+            result['metadata'] = {
+                'source_file': str(data['source_file'][0]) if len(data['source_file']) > 0 else None,
+                'fps': float(data['fps'][0]) if 'fps' in data and len(data['fps']) > 0 and data['fps'][0] is not None else None,
+                'total_frames': int(data['total_frames'][0]) if 'total_frames' in data and len(data['total_frames']) > 0 else 0,
+                'scale_method': str(data['scale_method'][0]) if 'scale_method' in data and len(data['scale_method']) > 0 else None,
+                'feature_method': str(data['feature_method'][0]) if 'feature_method' in data and len(data['feature_method']) > 0 else None,
+                'feature_dim': int(data['feature_dim'][0]) if 'feature_dim' in data and len(data['feature_dim']) > 0 else 0
+            }
+        else:
+            # Fallback: try to load from JSON metadata file (backward compatibility)
+            metadata_path = npz_path.with_suffix('.json')
+            if metadata_path.exists():
+                import json
+                with open(metadata_path, 'r') as f:
+                    result['metadata'] = json.load(f)
+            else:
+                result['metadata'] = {}
+        
+        return result
 
 
-def cluster_segment_features(npz_path, pca_components=6, min_cluster_size=50, min_samples=None, output_path=None):
+def cluster_segment_features(npz_path, pca_components=11, min_cluster_size=40, min_samples=None, output_path=None):
     """
     Cluster features from a single segment.
     
@@ -303,7 +347,7 @@ def cluster_segment_features(npz_path, pca_components=6, min_cluster_size=50, mi
     return results
 
 
-def cluster_multiple_segments(npz_paths, pca_components=6, min_cluster_size=50, min_samples=None, output_path=None):
+def cluster_multiple_segments(npz_paths, pca_components=11, min_cluster_size=40, min_samples=None, output_path=None):
     """
     Cluster features from multiple segments together.
     

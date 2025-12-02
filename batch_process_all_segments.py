@@ -1,9 +1,11 @@
 """
-Batch process all segments: extract landmarks, normalize, extract features, and cluster together.
+Batch process all clips: extract landmarks, normalize, extract features, and cluster together.
 """
 import sys
 from pathlib import Path
 import time
+import shutil
+# Removed threading imports - using sequential processing for reliability
 from src.hand_tracking import extract_landmarks, save_landmarks, smooth_landmarks
 from src.normalization import normalize_from_json
 from src.feature_extraction import extract_all_hands_features
@@ -17,9 +19,13 @@ import numpy as np
 import json
 
 
-def process_segment_pipeline(segment_path, segment_num, use_smoothing=True, smoothing_window=11, smoothing_polyorder=2):
+def process_segment_pipeline(segment_path, clip_id, use_smoothing=True, smoothing_window=11, smoothing_polyorder=2):
     """
-    Process a single segment through the full pipeline.
+    Process a single segment/clip through the full pipeline.
+    
+    Args:
+        segment_path: Path to the video file
+        clip_id: Identifier for the clip (filename without extension)
     
     Returns:
         Tuple of (hand0_features_path, hand1_features_path, smoothed_json_path) or None if failed
@@ -29,36 +35,76 @@ def process_segment_pipeline(segment_path, segment_num, use_smoothing=True, smoo
     landmarks_dir = Path("data/landmarks")
     
     print(f"\n{'='*60}")
-    print(f"Processing Segment {segment_num:03d}")
+    print(f"Processing Clip: {clip_id}")
     print(f"{'='*60}")
     
     # Step 1: Extract landmarks
-    landmarks_json = landmarks_dir / f"segment_{segment_num:03d}.json"
-    if not landmarks_json.exists():
+    landmarks_json = landmarks_dir / f"{clip_id}.json"
+    needs_extraction = True
+    if landmarks_json.exists():
+        # Check if file has the frame indexing bug (all frames labeled 0)
+        try:
+            with open(landmarks_json, 'r') as f:
+                data = json.load(f)
+            frames = [entry.get('frame', 0) for entry in data.get('landmarks', [])]
+            unique_frames = set(frames)
+            # If we have multiple entries but only one unique frame index (and it's 0), it's buggy
+            if len(frames) > 1 and len(unique_frames) == 1 and 0 in unique_frames:
+                print(f"  [INFO] Detected frame indexing bug in {landmarks_json.name}, regenerating...")
+                landmarks_json.unlink()  # Delete buggy file
+                # Also delete dependent files that will be regenerated
+                smoothed_json = landmarks_dir / f"{clip_id}_smoothed.json"
+                if smoothed_json.exists():
+                    smoothed_json.unlink()
+                normalized_json = landmarks_dir / f"{clip_id}_smoothed_normalized.json"
+                if normalized_json.exists():
+                    normalized_json.unlink()
+                normalized_json_raw = landmarks_dir / f"{clip_id}_normalized.json"
+                if normalized_json_raw.exists():
+                    normalized_json_raw.unlink()
+                # Delete feature files
+                for hand_idx in [0, 1]:
+                    for suffix in ['_smoothed_normalized_features_distance_matrix', '_normalized_features_distance_matrix']:
+                        feature_file = landmarks_dir / f"{clip_id}{suffix}_hand{hand_idx}.npz"
+                        if feature_file.exists():
+                            feature_file.unlink()
+            else:
+                needs_extraction = False
+                fps = data.get('fps', 25.0)
+                print(f"  [OK] Landmarks already exist: {landmarks_json.name} ({len(frames)} frames)")
+        except Exception as e:
+            print(f"  [WARN] Error checking existing landmarks file: {e}, regenerating...")
+            if landmarks_json.exists():
+                landmarks_json.unlink()
+    
+    if needs_extraction:
         print(f"  Step 1: Extracting landmarks...")
         try:
-            landmarks, fps = extract_landmarks(str(segment_path), use_gpu=True, save_format='json')
+            landmarks, fps = extract_landmarks(str(segment_path), use_gpu=False, save_format='json')
             save_landmarks(landmarks, fps, landmarks_json, format='json')
             print(f"  [OK] Landmarks extracted: {len(landmarks)} frames")
         except Exception as e:
             print(f"  [FAIL] Failed to extract landmarks: {e}")
             return None, None, None
-    else:
-        print(f"  [OK] Landmarks already exist: {landmarks_json.name}")
-        with open(landmarks_json, 'r') as f:
-            data = json.load(f)
-            fps = data.get('fps', 25.0)
     
     # Step 2: Smooth landmarks (if requested)
     if use_smoothing:
-        smoothed_json = landmarks_dir / f"segment_{segment_num:03d}_smoothed.json"
+        smoothed_json = landmarks_dir / f"{clip_id}_smoothed.json"
         if not smoothed_json.exists():
             print(f"  Step 2: Smoothing landmarks (window={smoothing_window}, polyorder={smoothing_polyorder})...")
             try:
-                # Load landmarks
+                # Load landmarks with hand_labels if available
                 with open(landmarks_json, 'r') as f:
                     data = json.load(f)
-                landmarks_list = [(entry['frame'], entry['hands']) for entry in data['landmarks']]
+                landmarks_list = []
+                for entry in data['landmarks']:
+                    frame_idx = entry['frame']
+                    hands = entry['hands']
+                    hand_labels = entry.get('hand_labels', [])
+                    if hand_labels:
+                        landmarks_list.append((frame_idx, hands, hand_labels))
+                    else:
+                        landmarks_list.append((frame_idx, hands))
                 
                 # Smooth
                 smoothed_landmarks = smooth_landmarks(landmarks_list, window_length=smoothing_window, polyorder=smoothing_polyorder)
@@ -70,29 +116,16 @@ def process_segment_pipeline(segment_path, segment_num, use_smoothing=True, smoo
         else:
             print(f"  [OK] Smoothed landmarks already exist: {smoothed_json.name}")
         
-        normalized_json = landmarks_dir / f"segment_{segment_num:03d}_smoothed_normalized.json"
+        normalized_json = landmarks_dir / f"{clip_id}_smoothed_normalized.json"
         input_json = smoothed_json
         skeleton_json = smoothed_json  # Use smoothed (original) skeleton data
     else:
-        normalized_json = landmarks_dir / f"segment_{segment_num:03d}_normalized.json"
+        normalized_json = landmarks_dir / f"{clip_id}_normalized.json"
         input_json = landmarks_json
         skeleton_json = landmarks_json  # Use original skeleton data
     
-    # Step 3: Normalize landmarks (ensure centroid metadata exists)
+    # Step 3: Normalize landmarks
     needs_normalization = not normalized_json.exists()
-    if not needs_normalization:
-        try:
-            with open(normalized_json, 'r') as f:
-                normalized_payload = json.load(f)
-            has_centroid_metadata = any(
-                isinstance(entry, dict) and 'hand_centroids' in entry
-                for entry in normalized_payload.get('landmarks', [])
-            )
-            if not has_centroid_metadata:
-                print(f"  [INFO] Existing normalized landmarks lack centroid metadata; regenerating.")
-                needs_normalization = True
-        except Exception:
-            needs_normalization = True
     
     if needs_normalization:
         print(f"  Step 3: Normalizing landmarks...")
@@ -105,70 +138,169 @@ def process_segment_pipeline(segment_path, segment_num, use_smoothing=True, smoo
     else:
         print(f"  [OK] Normalized landmarks already include centroid metadata: {normalized_json.name}")
     
-    # Step 4: Extract features
+    # Step 4: Extract features (consolidated into single NPZ file)
     if use_smoothing:
-        hand0_features = landmarks_dir / f"segment_{segment_num:03d}_smoothed_normalized_features_distance_matrix_hand0.npz"
-        hand1_features = landmarks_dir / f"segment_{segment_num:03d}_smoothed_normalized_features_distance_matrix_hand1.npz"
+        features_file = landmarks_dir / f"{clip_id}_smoothed_normalized_features_distance_matrix.npz"
     else:
-        hand0_features = landmarks_dir / f"segment_{segment_num:03d}_normalized_features_distance_matrix_hand0.npz"
-        hand1_features = landmarks_dir / f"segment_{segment_num:03d}_normalized_features_distance_matrix_hand1.npz"
+        features_file = landmarks_dir / f"{clip_id}_normalized_features_distance_matrix.npz"
     
-    if not hand0_features.exists() or not hand1_features.exists():
+    if not features_file.exists():
         print(f"  Step 4: Extracting features...")
         try:
-            results = extract_all_hands_features(str(normalized_json), method='distance_matrix')
-            hand0_features = Path(results['hand0']['output_path'])
-            hand1_features = Path(results['hand1']['output_path'])
-            print(f"  [OK] Features extracted: Hand0={results['hand0']['metadata']['frames_with_features']} frames, "
-                  f"Hand1={results['hand1']['metadata']['frames_with_features']} frames")
+            results = extract_all_hands_features(str(normalized_json), method='distance_matrix', output_path=str(features_file))
+            print(f"  [OK] Features extracted: {len(results['common_frames'])} frames with both hands")
         except Exception as e:
             print(f"  [FAIL] Failed to extract features: {e}")
             return None, None, None
     else:
-        print(f"  [OK] Features already exist: {hand0_features.name}, {hand1_features.name}")
+        print(f"  [OK] Features already exist: {features_file.name}")
     
-    return hand0_features, hand1_features, skeleton_json
+    return features_file, features_file, skeleton_json  # Return same file twice for compatibility
 
 
-def combine_hands_features(hand0_path, hand1_path):
-    """Combine features from both hands for a segment."""
-    hand0_data = load_features_from_npz(hand0_path)
-    hand1_data = load_features_from_npz(hand1_path)
+def check_clip_has_both_hands(clip_file, clip_id, landmarks_dir, use_smoothing=True):
+    """
+    Quick check if a clip has any frames with both hands detected.
+    This is a lightweight check to filter clips before full processing.
     
-    # Get common frames
-    hand0_frames = set(hand0_data['frame_indices'])
-    hand1_frames = set(hand1_data['frame_indices'])
-    common_frames = sorted(list(hand0_frames & hand1_frames))
+    Args:
+        clip_file: Path to video file
+        clip_id: Clip identifier
+        landmarks_dir: Directory for landmarks
+        use_smoothing: Whether to check smoothed landmarks
     
-    if len(common_frames) == 0:
-        return None, None
+    Returns:
+        Tuple of (has_both_hands: bool, frames_with_both_hands: int)
+    """
+    # Check if landmarks already exist
+    if use_smoothing:
+        landmarks_json = landmarks_dir / f"{clip_id}_smoothed.json"
+        if not landmarks_json.exists():
+            landmarks_json = landmarks_dir / f"{clip_id}.json"
+    else:
+        landmarks_json = landmarks_dir / f"{clip_id}.json"
     
-    # Create mapping
-    hand0_frame_to_idx = {frame: idx for idx, frame in enumerate(hand0_data['frame_indices'])}
-    hand1_frame_to_idx = {frame: idx for idx, frame in enumerate(hand1_data['frame_indices'])}
+    # If landmarks exist, check them
+    if landmarks_json.exists():
+        try:
+            with open(landmarks_json, 'r') as f:
+                data = json.load(f)
+            
+            frames_with_both_hands = 0
+            for entry in data.get('landmarks', []):
+                hands = entry.get('hands', [])
+                # Count how many hands have landmarks
+                valid_hands = sum(1 for hand in hands if hand and len(hand) > 0)
+                if valid_hands >= 2:
+                    frames_with_both_hands += 1
+            
+            return frames_with_both_hands > 0, frames_with_both_hands
+        except Exception as e:
+            # If we can't read the file, we'll need to extract landmarks
+            pass
     
-    # Combine features
-    combined_features = []
-    for frame in common_frames:
-        h0_idx = hand0_frame_to_idx[frame]
-        h1_idx = hand1_frame_to_idx[frame]
-        combined_feature = np.concatenate([
-            hand0_data['features'][h0_idx],
-            hand1_data['features'][h1_idx]
-        ])
-        combined_features.append(combined_feature)
+    # If landmarks don't exist, we need to extract them (but don't save)
+    # This is slower but necessary for first pass
+    try:
+        from src.hand_tracking import extract_landmarks
+        landmarks, fps = extract_landmarks(str(clip_file), use_gpu=False, save_format='json')
+        
+        frames_with_both_hands = 0
+        for entry in landmarks:
+            if len(entry) >= 2:
+                hands = entry[1]
+                valid_hands = sum(1 for hand in hands if hand and len(hand) > 0)
+                if valid_hands >= 2:
+                    frames_with_both_hands += 1
+        
+        # Save the landmarks since we extracted them
+        landmarks_json = landmarks_dir / f"{clip_id}.json"
+        from src.hand_tracking import save_landmarks
+        save_landmarks(landmarks, fps, landmarks_json, format='json')
+        
+        return frames_with_both_hands > 0, frames_with_both_hands
+    except Exception as e:
+        return False, 0
+
+
+def ensure_visualizer_file(source_path=None):
+    """
+    Ensure the clustered JSON file exists in visualizer/public/ directory.
+    If source_path is provided, copy from there. Otherwise, look for it in data/landmarks/.
     
-    return np.array(combined_features), common_frames
+    Args:
+        source_path: Optional path to source JSON file. If None, looks in data/landmarks/
+    
+    Returns:
+        Path to visualizer JSON file if successful, None otherwise
+    """
+    visualizer_public = Path("visualizer/public")
+    visualizer_json = visualizer_public / "all_segments_clustered_with_xy.json"
+    
+    # If visualizer file already exists, return it
+    if visualizer_json.exists():
+        return visualizer_json
+    
+    # Find source file
+    if source_path:
+        source = Path(source_path)
+    else:
+        # Look in data/landmarks/
+        landmarks_dir = Path("data/landmarks")
+        source = landmarks_dir / "all_segments_clustered_with_xy.json"
+        
+        # Also check in old/ directory
+        if not source.exists():
+            old_source = landmarks_dir / "old" / "all_segments_clustered_with_xy.json"
+            if old_source.exists():
+                source = old_source
+    
+    if not source.exists():
+        print(f"Warning: Source file not found: {source}")
+        print("Please run batch_process_all_segments.py to generate the clustered data.")
+        return None
+    
+    # Copy to visualizer
+    try:
+        visualizer_public.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, visualizer_json)
+        print(f"Copied clustered data to visualizer: {visualizer_json}")
+        return visualizer_json
+    except Exception as e:
+        print(f"Warning: Could not copy to visualizer/public/: {e}")
+        return None
+
+
+def combine_hands_features(features_path, normalized_json_path=None):
+    """
+    Load combined features from consolidated NPZ file.
+    
+    Args:
+        features_path: Path to consolidated features NPZ file (contains combined_features)
+        normalized_json_path: Not used anymore (kept for compatibility)
+    
+    Returns:
+        Tuple of (combined_features_array, common_frames)
+        Combined features include: hand0_intra (441) + hand1_intra (441) + inter_hand (441) = 1323 dims
+    """
+    data = load_features_from_npz(features_path)
+    
+    # Check if this is the new consolidated format
+    if 'combined_features' in data:
+        return data['combined_features'], list(data['frame_indices'])
+    
+    # Fallback: old format (separate hand0/hand1 files) - shouldn't happen with new code
+    return None, None
 
 
 def main():
-    segments_dir = Path("data/segments")
+    clips_dir = Path("data/clips")
     landmarks_dir = Path("data/landmarks")
     
     # Clustering parameters
-    pca_components = 6
-    min_cluster_size = 50
-    min_samples = 10
+    pca_components = 11
+    min_cluster_size = 40
+    min_samples = 15
     use_smoothing = True
     smoothing_window = 11
     smoothing_polyorder = 2
@@ -179,7 +311,7 @@ def main():
             idx = sys.argv.index('--pca')
             pca_components = int(sys.argv[idx + 1])
         except (IndexError, ValueError):
-            print("Warning: Invalid --pca value, using default 6")
+            print("Warning: Invalid --pca value, using default 11")
     
     if '--min-size' in sys.argv:
         try:
@@ -198,17 +330,17 @@ def main():
     if '--no-smoothing' in sys.argv:
         use_smoothing = False
     
-    # Find all segment files
-    segment_files = sorted(segments_dir.glob("segment_*.mp4"))
+    # Find all clip files
+    clip_files = sorted(clips_dir.glob("*.mp4"))
     
-    if len(segment_files) == 0:
-        print("Error: No segment files found in data/segments/")
+    if len(clip_files) == 0:
+        print("Error: No clip files found in data/clips/")
         return
     
     print("="*60)
-    print("BATCH PROCESSING ALL SEGMENTS")
+    print("BATCH PROCESSING ALL CLIPS")
     print("="*60)
-    print(f"Found {len(segment_files)} segments")
+    print(f"Found {len(clip_files)} clips")
     print(f"Parameters:")
     print(f"  Smoothing: {use_smoothing} (window={smoothing_window}, polyorder={smoothing_polyorder})")
     print(f"  PCA components: {pca_components}")
@@ -216,37 +348,92 @@ def main():
     print(f"  Min samples: {min_samples}")
     print("="*60)
     
-    # Process each segment
+    # FIRST PASS: Check which clips have frames with both hands
+    print("\n" + "="*60)
+    print("PASS 1: Checking for clips with both hands")
+    print("="*60)
+    clips_with_both_hands = []
+    clips_without_both_hands = []
+    
+    total_clips = len(clip_files)
+    pass1_start = time.time()
+    
+    for idx, clip_file in enumerate(clip_files, 1):
+        clip_id = clip_file.stem
+        remaining = total_clips - idx
+        
+        print(f"[{idx}/{total_clips}] Checking: {clip_id} ({remaining} remaining)", end='', flush=True)
+        
+        try:
+            has_both, count = check_clip_has_both_hands(
+                clip_file, clip_id, landmarks_dir, use_smoothing=use_smoothing
+            )
+            
+            if has_both:
+                clips_with_both_hands.append(clip_file)
+                print(f" ✓ {count} frames with both hands")
+            else:
+                clips_without_both_hands.append(clip_id)
+                print(f" ✗ No frames with both hands")
+        except Exception as e:
+            clips_without_both_hands.append(clip_id)
+            print(f" ✗ Error: {e}")
+    
+    pass1_elapsed = time.time() - pass1_start
+    print(f"\nPass 1 complete in {pass1_elapsed:.1f} seconds")
+    print(f"  Clips with both hands: {len(clips_with_both_hands)}")
+    print(f"  Clips without both hands: {len(clips_without_both_hands)}")
+    
+    if len(clips_with_both_hands) == 0:
+        print("\nERROR: No clips found with frames containing both hands!")
+        print("Cannot proceed with clustering.")
+        return
+    
+    # SECOND PASS: Process only clips with both hands
+    print("\n" + "="*60)
+    print("PASS 2: Processing clips with both hands")
+    print("="*60)
+    
+    # Process each segment sequentially
     all_combined_features = []
     all_frame_info = []
     successful_segments = []
     failed_segments = []
     
+    # Process clips sequentially (single-threaded) to avoid file I/O conflicts
+    # OpenCV VideoCapture and MediaPipe have thread-safety issues
+    # Sequential processing is more reliable for file operations
+    print(f"\nProcessing {len(clips_with_both_hands)} clips sequentially (single-threaded for reliability)...")
     start_time = time.time()
     
-    for segment_file in segment_files:
-        # Extract segment number from filename
-        segment_num = int(segment_file.stem.split('_')[1])
+    # Process each clip sequentially
+    total_clips = len(clips_with_both_hands)
+    for idx, clip_file in enumerate(clips_with_both_hands, 1):
+        clip_id = clip_file.stem  # Use filename without extension as identifier
+        remaining = total_clips - idx
+        
+        print(f"\n[{idx}/{total_clips}] Processing: {clip_id} ({remaining} remaining)")
         
         try:
-            hand0_path, hand1_path, skeleton_json_path = process_segment_pipeline(
-                segment_file,
-                segment_num,
+            features_path, _, skeleton_json_path = process_segment_pipeline(
+                clip_file,
+                clip_id,
                 use_smoothing=use_smoothing,
                 smoothing_window=smoothing_window,
                 smoothing_polyorder=smoothing_polyorder
             )
             
-            if hand0_path is None or hand1_path is None or skeleton_json_path is None:
-                failed_segments.append(segment_num)
+            if features_path is None or skeleton_json_path is None:
+                failed_segments.append(clip_id)
+                print(f"  [FAIL] Pipeline failed for {clip_id}")
                 continue
             
-            # Combine hands features
-            combined_features, common_frames = combine_hands_features(hand0_path, hand1_path)
+            # Load combined features (already includes inter-hand distances in consolidated file)
+            combined_features, common_frames = combine_hands_features(features_path)
             
             if combined_features is None or len(combined_features) == 0:
-                print(f"  [WARN] No common frames with both hands, skipping segment {segment_num}")
-                failed_segments.append(segment_num)
+                print(f"  [WARN] Clip {clip_id}: No common frames with both hands")
+                failed_segments.append(clip_id)
                 continue
             
             # Load per-frame original skeleton landmarks (smoothed but NOT PCA-normalized)
@@ -257,18 +444,22 @@ def main():
             for i, frame in enumerate(common_frames):
                 all_combined_features.append(combined_features[i])
                 all_frame_info.append({
-                    'segment': segment_num,
+                    'clip': clip_id,
                     'frame': int(frame),
                     'feature_idx': len(all_combined_features) - 1,
                     'hand_landmarks': landmarks_lookup.get(int(frame), [])
                 })
             
-            successful_segments.append(segment_num)
-            print(f"  [OK] Segment {segment_num:03d}: {len(combined_features)} frames added")
+            successful_segments.append(clip_id)
+            elapsed_so_far = time.time() - start_time
+            avg_time_per_clip = elapsed_so_far / idx if idx > 0 else 0
+            remaining = total_clips - idx
+            estimated_remaining = avg_time_per_clip * remaining if avg_time_per_clip > 0 else 0
+            print(f"  [OK] {len(combined_features)} frames added | Progress: {idx}/{total_clips} ({idx/total_clips*100:.1f}%) | Est. remaining: {estimated_remaining/60:.1f} min")
             
         except Exception as e:
-            print(f"  [FAIL] Segment {segment_num:03d} failed: {e}")
-            failed_segments.append(segment_num)
+            print(f"  [FAIL] Clip {clip_id} failed: {e}")
+            failed_segments.append(clip_id)
             import traceback
             traceback.print_exc()
     
@@ -277,10 +468,15 @@ def main():
     print("\n" + "="*60)
     print("PROCESSING SUMMARY")
     print("="*60)
-    print(f"Successful segments: {len(successful_segments)}")
-    print(f"Failed segments: {len(failed_segments)}")
+    print(f"Total clips scanned: {len(clip_files)}")
+    print(f"  Clips with both hands: {len(clips_with_both_hands)}")
+    print(f"  Clips without both hands: {len(clips_without_both_hands)}")
+    print(f"Successful clips processed: {len(successful_segments)}")
+    print(f"Failed clips: {len(failed_segments)}")
     print(f"Total frames with both hands: {len(all_combined_features)}")
-    print(f"Processing time: {elapsed:.1f} seconds")
+    print(f"Pass 1 time: {pass1_elapsed:.1f} seconds")
+    print(f"Pass 2 time: {elapsed:.1f} seconds")
+    print(f"Total processing time: {pass1_elapsed + elapsed:.1f} seconds")
     
     if len(all_combined_features) == 0:
         print("\nERROR: No features collected from any segment!")
@@ -291,7 +487,7 @@ def main():
     print("CLUSTERING ALL SEGMENTS TOGETHER")
     print("="*60)
     print(f"Total features: {len(all_combined_features)}")
-    print(f"Feature dimension: {all_combined_features[0].shape[0]} (882 = 441 per hand)")
+    print(f"Feature dimension: {all_combined_features[0].shape[0]} (1323 = 441 per hand + 441 inter-hand)")
     print(f"PCA components: {pca_components}")
     print(f"Min cluster size: {min_cluster_size}")
     print(f"Min samples: {min_samples}")
@@ -323,9 +519,9 @@ def main():
         
         # Create results
         results = {
-            'n_segments': len(successful_segments),
-            'successful_segments': successful_segments,
-            'failed_segments': failed_segments,
+            'n_clips': len(successful_segments),
+            'successful_clips': successful_segments,
+            'failed_clips': failed_segments,
             'n_frames': len(all_combined_features),
             'n_clusters': cluster_result['n_clusters'],
             'n_noise': cluster_result['n_noise'],
@@ -353,10 +549,13 @@ def main():
         labels_path = landmarks_dir / "all_segments_clustered_with_xy.npy"
         np.save(labels_path, labels)
         
+        # Ensure visualizer has the file
+        ensure_visualizer_file(output_path)
+        
         print("="*60)
         print("SUCCESS!")
         print("="*60)
-        print(f"Total segments processed: {len(successful_segments)}")
+        print(f"Total clips processed: {len(successful_segments)}")
         print(f"Total frames (both hands): {results['n_frames']}")
         print(f"Number of clusters: {results['n_clusters']}")
         print(f"Noise/outliers: {results['n_noise']} ({results['n_noise']/results['n_frames']*100:.1f}%)")
@@ -372,6 +571,10 @@ def main():
         print()
         print(f"Results saved to: {output_path}")
         print(f"Labels saved to: {labels_path}")
+        
+        # Ensure visualizer has the file
+        ensure_visualizer_file(output_path)
+        
         print("="*60)
         
     except Exception as e:

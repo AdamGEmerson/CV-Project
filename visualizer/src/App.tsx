@@ -78,7 +78,7 @@ type ClusterLandmarksSummary = {
 }
 
 type ClusteredFrame = {
-  segment: number
+  clip: string  // Changed from segment: number
   frame: number
   feature_idx: number
   cluster: number
@@ -89,18 +89,18 @@ type ClusteredFrame = {
 }
 
 type ClusterData = {
-  n_segments: number
+  n_clips: number  // Changed from n_segments
   n_frames: number
   n_clusters: number
   n_noise: number
-  successful_segments: number[]
-  failed_segments: number[]
+  successful_clips: string[]  // Changed from successful_segments: number[]
+  failed_clips: string[]  // Changed from failed_segments: number[]
   clustered_frames: ClusteredFrame[]
   cluster_distribution: Record<string, number>
   cluster_landmarks?: Record<string, ClusterLandmarksSummary>
 }
 
-const DATA_PATH = '/all_segments_clustered_with_xy.json'
+const DATA_PATH = '/data/landmarks/all_segments_clustered_with_xy.json'
 const DEFAULT_FPS = 25
 
 type ClusterStat = {
@@ -117,15 +117,14 @@ type HoverPreviewState = {
   error?: string
 }
 
-const padSegment = (segment: number) => segment.toString().padStart(3, '0')
-const buildSegmentVideoPath = (segment: number) => `/segments/segment_${padSegment(segment)}.mp4`
+const buildClipVideoPath = (clip: string) => `/clips/${clip}.mp4`
 
 function App() {
   const [data, setData] = useState<ClusterData | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [selectedCluster, setSelectedCluster] = useState<number | null>(null)
-  const [selectedSegment, setSelectedSegment] = useState<number | null>(null)
+  const [selectedClip, setSelectedClip] = useState<string | null>(null)
   const [selectedFrame, setSelectedFrame] = useState<ClusteredFrame | null>(null)
   const [fps, setFps] = useState(DEFAULT_FPS)
   const [pendingSeek, setPendingSeek] = useState<number | null>(null)
@@ -138,6 +137,13 @@ function App() {
     fetch(DATA_PATH)
       .then(async (response) => {
         if (!response.ok) {
+          if (response.status === 404) {
+            throw new Error(
+              `Cluster data file not found at ${DATA_PATH}. ` +
+              `Please run the batch processing script to generate it: ` +
+              `python3 batch_process_all_segments.py`
+            )
+          }
           throw new Error(`Unable to load cluster data (${response.status})`)
         }
         return response.json() as Promise<ClusterData>
@@ -172,10 +178,10 @@ function App() {
     }
     for (const clusterFrames of map.values()) {
       clusterFrames.sort((a, b) => {
-        if (a.segment === b.segment) {
+        if (a.clip === b.clip) {
           return a.frame - b.frame
         }
-        return a.segment - b.segment
+        return a.clip.localeCompare(b.clip)
       })
     }
     return map
@@ -214,45 +220,31 @@ function App() {
     return clusterLandmarksMap.get(selectedCluster) ?? null
   }, [clusterLandmarksMap, selectedCluster])
 
-  // Prepare 3D hand skeleton data for Plotly - one plot per hand
-  const handSkeletonPlots = useMemo(() => {
+  // Prepare 3D hand skeleton data for Plotly - combine both hands in a single plot
+  const handSkeletonPlot = useMemo(() => {
     if (!selectedClusterLandmarks || selectedClusterLandmarks.hands.length === 0) {
-      return []
+      return null
     }
 
-    return selectedClusterLandmarks.hands.map((handData) => {
+    const allTraces: Partial<Data>[] = []
+    const allXs: number[] = []
+    const allYs: number[] = []
+    const allZs: number[] = []
+
+    // Process each hand
+    selectedClusterLandmarks.hands.forEach((handData) => {
       const landmarks = handData.landmarks
-      const color = HAND_COLORS[handData.hand_index % HAND_COLORS.length]
+      const handColor = HAND_COLORS[handData.hand_index % HAND_COLORS.length]
+      const handLabel = handData.hand_index === 0 ? 'Left' : 'Right'
 
-      // Extract x, y, z coordinates for all landmarks
-      const xs = landmarks.map((lm) => lm[0])
-      const ys = landmarks.map((lm) => lm[1])
-      const zs = landmarks.map((lm) => lm[2])
+      // Collect all coordinates for bounding box calculation
+      landmarks.forEach((lm) => {
+        allXs.push(lm[0])
+        allYs.push(lm[1])
+        allZs.push(lm[2])
+      })
 
-      // Calculate bounding box for camera positioning
-      const minX = Math.min(...xs)
-      const maxX = Math.max(...xs)
-      const minY = Math.min(...ys)
-      const maxY = Math.max(...ys)
-      const minZ = Math.min(...zs)
-      const maxZ = Math.max(...zs)
-      const centerX = (minX + maxX) / 2
-      const centerY = (minY + maxY) / 2
-      const centerZ = (minZ + maxZ) / 2
-      // Very tight range for maximum zoom (minimal padding, 0.5x)
-      const rawRange = Math.max(maxX - minX, maxY - minY, maxZ - minZ)
-      const range = rawRange > 0 ? rawRange * 0.5 : 0.5
-
-      // Calculate camera position to view with thumb pointing up
-      // Position camera very close for maximum zoom (0.6x distance)
-      const cameraDistance = range * 0.6
-      const cameraX = centerX + cameraDistance * 0.7
-      const cameraY = centerY + cameraDistance * 0.3
-      const cameraZ = centerZ + cameraDistance * 0.5
-
-      const traces: Partial<Data>[] = []
-
-      // Create scatter plots for each finger with different colors
+      // Create scatter plots for each finger with different colors, prefixed with hand label
       Object.entries(FINGER_LANDMARKS).forEach(([fingerName, indices]) => {
         const fingerXs: number[] = []
         const fingerYs: number[] = []
@@ -264,19 +256,19 @@ function App() {
             fingerXs.push(landmarks[idx][0])
             fingerYs.push(landmarks[idx][1])
             fingerZs.push(landmarks[idx][2])
-            // Label fingertips and key joints
+            // Label fingertips and key joints with hand prefix
             if (idx === 0) {
-              fingerLabels.push('Wrist')
+              fingerLabels.push(`${handLabel} Wrist`)
             } else if (idx === 4) {
-              fingerLabels.push('Thumb tip')
+              fingerLabels.push(`${handLabel} Thumb tip`)
             } else if (idx === 8) {
-              fingerLabels.push('Index tip')
+              fingerLabels.push(`${handLabel} Index tip`)
             } else if (idx === 12) {
-              fingerLabels.push('Middle tip')
+              fingerLabels.push(`${handLabel} Middle tip`)
             } else if (idx === 16) {
-              fingerLabels.push('Ring tip')
+              fingerLabels.push(`${handLabel} Ring tip`)
             } else if (idx === 20) {
-              fingerLabels.push('Pinky tip')
+              fingerLabels.push(`${handLabel} Pinky tip`)
             } else {
               fingerLabels.push('')
             }
@@ -284,10 +276,10 @@ function App() {
         })
 
         if (fingerXs.length > 0) {
-          traces.push({
+          allTraces.push({
             type: 'scatter3d',
             mode: 'text+markers',
-            name: FINGER_LABELS[fingerName as keyof typeof FINGER_LABELS],
+            name: `${handLabel} ${FINGER_LABELS[fingerName as keyof typeof FINGER_LABELS]}`,
             x: fingerXs,
             y: fingerYs,
             z: fingerZs,
@@ -315,7 +307,7 @@ function App() {
       HAND_CONNECTIONS.forEach(([fromIdx, toIdx]) => {
         if (fromIdx < landmarks.length && toIdx < landmarks.length) {
           // Determine which finger this connection belongs to
-          let connectionColor = color
+          let connectionColor = handColor
           if (FINGER_LANDMARKS.thumb.includes(fromIdx) || FINGER_LANDMARKS.thumb.includes(toIdx)) {
             connectionColor = FINGER_COLORS.thumb
           } else if (FINGER_LANDMARKS.index.includes(fromIdx) || FINGER_LANDMARKS.index.includes(toIdx)) {
@@ -330,7 +322,7 @@ function App() {
             connectionColor = FINGER_COLORS.wrist
           }
 
-          traces.push({
+          allTraces.push({
             type: 'scatter3d',
             mode: 'lines',
             name: '',
@@ -346,51 +338,127 @@ function App() {
           })
         }
       })
+    })
 
-      return {
-        handIndex: handData.hand_index,
-        traces,
-        layout: {
-          margin: { l: 0, r: 0, b: 0, t: 0 },
-          scene: {
-            xaxis: { 
-              title: { text: 'X' }, 
-              range: [centerX - range, centerX + range],
-              autorange: false
-            },
-            yaxis: { 
-              title: { text: 'Y' }, 
-              range: [centerY - range, centerY + range],
-              autorange: false
-            },
-            zaxis: { 
-              title: { text: 'Z' }, 
-              range: [centerZ - range, centerZ + range],
-              autorange: false
-            },
-            aspectmode: 'cube',
-            camera: {
-              eye: { x: cameraX, y: cameraY, z: cameraZ },
-              center: { x: centerX, y: centerY, z: centerZ },
-              up: { x: 0, y: 1, z: 0 } // Y-axis up (thumb should point this way)
-            }
-          },
-          hovermode: 'closest',
-          paper_bgcolor: 'rgba(0,0,0,0)',
-          plot_bgcolor: 'rgba(0,0,0,0)',
-          showlegend: true,
-          legend: {
-            x: 0.02,
-            y: 0.98,
-            bgcolor: 'rgba(255,255,255,0.9)',
-            bordercolor: '#cbd5f5',
-            borderwidth: 1,
-            font: { size: 11 }
+    // Calculate bounding box across all hands with padding
+    const minX = Math.min(...allXs)
+    const maxX = Math.max(...allXs)
+    const minY = Math.min(...allYs)
+    const maxY = Math.max(...allYs)
+    const minZ = Math.min(...allZs)
+    const maxZ = Math.max(...allZs)
+    
+    // Add padding to ensure all points are visible
+    const padding = 0.2 // 20% padding
+    const rangeX = maxX - minX
+    const rangeY = maxY - minY
+    const rangeZ = maxZ - minZ
+    const maxRange = Math.max(rangeX, rangeY, rangeZ)
+    
+    const centerX = (minX + maxX) / 2
+    const centerY = (minY + maxY) / 2
+    const centerZ = (minZ + maxZ) / 2
+    
+    // Calculate average wrist position (landmark 0) and fingertip positions
+    const wristPositions: number[][] = []
+    const fingertipPositions: number[][] = []
+    const fingertipIndices = [4, 8, 12, 16, 20] // Thumb, Index, Middle, Ring, Pinky tips
+    
+    selectedClusterLandmarks.hands.forEach((handData) => {
+      const landmarks = handData.landmarks
+      if (landmarks.length > 0) {
+        // Wrist is landmark 0
+        wristPositions.push([landmarks[0][0], landmarks[0][1], landmarks[0][2]])
+        // Collect all fingertips
+        fingertipIndices.forEach((idx) => {
+          if (idx < landmarks.length) {
+            fingertipPositions.push([landmarks[idx][0], landmarks[idx][1], landmarks[idx][2]])
           }
-        },
-        count: handData.count
+        })
       }
     })
+    
+    // Calculate average wrist and fingertip positions
+    const avgWrist = wristPositions.length > 0
+      ? [
+          wristPositions.reduce((sum, p) => sum + p[0], 0) / wristPositions.length,
+          wristPositions.reduce((sum, p) => sum + p[1], 0) / wristPositions.length,
+          wristPositions.reduce((sum, p) => sum + p[2], 0) / wristPositions.length
+        ]
+      : [centerX, centerY, centerZ]
+    
+    const avgFingertips = fingertipPositions.length > 0
+      ? [
+          fingertipPositions.reduce((sum, p) => sum + p[0], 0) / fingertipPositions.length,
+          fingertipPositions.reduce((sum, p) => sum + p[1], 0) / fingertipPositions.length,
+          fingertipPositions.reduce((sum, p) => sum + p[2], 0) / fingertipPositions.length
+        ]
+      : [centerX, centerY, centerZ]
+    
+    // Calculate direction from wrists to fingertips
+    const directionX = avgFingertips[0] - avgWrist[0]
+    const directionY = avgFingertips[1] - avgWrist[1]
+    const directionZ = avgFingertips[2] - avgWrist[2]
+    const directionLength = Math.sqrt(directionX * directionX + directionY * directionY + directionZ * directionZ)
+    
+    // Normalize direction
+    const dirX = directionLength > 0 ? directionX / directionLength : 0
+    const dirY = directionLength > 0 ? directionY / directionLength : 0
+    const dirZ = directionLength > 0 ? directionZ / directionLength : 0
+    
+    // Position camera looking from fingertips toward wrists
+    // Camera should be positioned behind fingertips (in the direction away from wrists)
+    // so that fingertips appear closest and wrists appear furthest
+    const cameraDistance = maxRange * 2.0 // Increased distance for better view
+    // Position camera in the direction from wrists to fingertips, but further out
+    const cameraX = avgFingertips[0] + dirX * cameraDistance
+    const cameraY = avgFingertips[1] + dirY * cameraDistance
+    const cameraZ = avgFingertips[2] + dirZ * cameraDistance
+    
+    // Calculate range for axes with padding
+    const range = maxRange > 0 ? maxRange * (1 + padding * 2) / 2 : 1.0
+
+    return {
+      traces: allTraces,
+      layout: {
+        margin: { l: 0, r: 0, b: 0, t: 0 },
+        scene: {
+          xaxis: { 
+            title: { text: 'X' }, 
+            range: [centerX - range, centerX + range],
+            autorange: false
+          },
+          yaxis: { 
+            title: { text: 'Y' }, 
+            range: [centerY - range, centerY + range],
+            autorange: false
+          },
+          zaxis: { 
+            title: { text: 'Z' }, 
+            range: [centerZ - range, centerZ + range],
+            autorange: false
+          },
+          aspectmode: 'cube',
+          camera: {
+            eye: { x: cameraX, y: cameraY, z: cameraZ },
+            center: { x: centerX, y: centerY, z: centerZ },
+            up: { x: 0, y: 1, z: 0 } // Y-axis up
+          }
+        },
+        hovermode: 'closest',
+        paper_bgcolor: 'rgba(0,0,0,0)',
+        plot_bgcolor: 'rgba(0,0,0,0)',
+        showlegend: true,
+        legend: {
+          x: 0.02,
+          y: 0.98,
+          bgcolor: 'rgba(255,255,255,0.9)',
+          bordercolor: '#cbd5f5',
+          borderwidth: 1,
+          font: { size: 11 }
+        }
+      }
+    }
   }, [selectedClusterLandmarks])
 
   const framesForSelectedCluster = useMemo(() => {
@@ -419,15 +487,15 @@ function App() {
     return map
   }, [allScatterFrames])
 
-  const groupedBySegment = useMemo(() => {
-    const grouping = new Map<number, ClusteredFrame[]>()
+  const groupedByClip = useMemo(() => {
+    const grouping = new Map<string, ClusteredFrame[]>()
     for (const frame of framesForSelectedCluster) {
-      if (!grouping.has(frame.segment)) {
-        grouping.set(frame.segment, [])
+      if (!grouping.has(frame.clip)) {
+        grouping.set(frame.clip, [])
       }
-      grouping.get(frame.segment)!.push(frame)
+      grouping.get(frame.clip)!.push(frame)
     }
-    return Array.from(grouping.entries()).sort((a, b) => a[0] - b[0])
+    return Array.from(grouping.entries()).sort(([a], [b]) => a.localeCompare(b))
   }, [framesForSelectedCluster])
 
   useEffect(() => {
@@ -469,7 +537,7 @@ function App() {
         z: frames.map((frame) => frame.z ?? 0),
         text: frames.map(
           (frame) =>
-            `Segment ${padSegment(frame.segment)} • Frame ${frame.frame} • Cluster ${frame.cluster}`
+            `Clip ${frame.clip} • Frame ${frame.frame} • Cluster ${frame.cluster}`
         ),
         hoverinfo: 'text',
         customdata: frames.map((frame) => frame.feature_idx),
@@ -511,7 +579,7 @@ function App() {
 
   const captureFrameImage = useCallback(
     async (frame: ClusteredFrame) => {
-      const cacheKey = `${frame.segment}-${frame.frame}`
+      const cacheKey = `${frame.clip}-${frame.frame}`
       const cached = frameImageCache.current.get(cacheKey)
       if (cached) {
         return cached
@@ -523,7 +591,7 @@ function App() {
       video.crossOrigin = 'anonymous'
       video.preload = 'auto'
       video.muted = true
-      video.src = buildSegmentVideoPath(frame.segment)
+      video.src = buildClipVideoPath(frame.clip)
       await new Promise<void>((resolve, reject) => {
         video.onloadedmetadata = () => {
           video.onloadedmetadata = null
@@ -576,7 +644,7 @@ function App() {
 
   const handlePointHover = useCallback(
     (frame: ClusteredFrame) => {
-      const cacheKey = `${frame.segment}-${frame.frame}`
+      const cacheKey = `${frame.clip}-${frame.frame}`
       const cached = frameImageCache.current.get(cacheKey)
       if (cached) {
         setHoverPreview({ frame, status: 'ready', imageUrl: cached })
@@ -606,7 +674,7 @@ function App() {
     setHoverPreview(null)
   }, [])
 
-  const videoSrc = selectedSegment !== null ? buildSegmentVideoPath(selectedSegment) : null
+  const videoSrc = selectedClip !== null ? buildClipVideoPath(selectedClip) : null
 
   const seekTime = useMemo(() => {
     if (!selectedFrame || !fps) return null
@@ -624,7 +692,7 @@ function App() {
     } else {
       setPendingSeek(seekTime)
     }
-  }, [seekTime, selectedSegment])
+  }, [seekTime, selectedClip])
 
   const handleVideoLoaded = () => {
     if (pendingSeek === null) return
@@ -641,13 +709,13 @@ function App() {
     setSelectedFrame(null)
   }
 
-  const handleSegmentToggle = (segmentId: number) => {
-    setSelectedSegment((current) => (current === segmentId ? null : segmentId))
+  const handleClipToggle = (clipId: string) => {
+    setSelectedClip((current) => (current === clipId ? null : clipId))
     setSelectedFrame(null)
   }
 
   const handleFrameClick = (frame: ClusteredFrame) => {
-    setSelectedSegment(frame.segment)
+    setSelectedClip(frame.clip)
     setSelectedFrame(frame)
   }
 
@@ -733,7 +801,7 @@ function App() {
         <p className="eyebrow">Clay-hand pipeline · cluster explorer</p>
         <h1>Cluster visualizer</h1>
         <p className="subtitle">
-          Browse {data.n_frames.toLocaleString()} clustered frames ({data.n_segments} segments) and
+          Browse {data.n_frames.toLocaleString()} clustered frames ({data.n_clips} clips) and
           jump straight into the source clips.
         </p>
       </header>
@@ -747,10 +815,10 @@ function App() {
           </p>
         </article>
         <article>
-          <p className="summary-label">Segments covered</p>
-          <p className="summary-value">{data.successful_segments.length}</p>
+          <p className="summary-label">Clips covered</p>
+          <p className="summary-value">{data.successful_clips.length}</p>
           <p className="summary-note">
-            {data.failed_segments.length} segments failed in preprocessing
+            {data.failed_clips.length} clips failed in preprocessing
           </p>
         </article>
         <article>
@@ -773,7 +841,7 @@ function App() {
       <section>
         <div className="section-header">
           <h2>Clusters</h2>
-          <p>Select a cluster to inspect its frames grouped by segment.</p>
+          <p>Select a cluster to inspect its frames grouped by clip.</p>
         </div>
         <div className="cluster-list">
           {clusterStats.map((stat) => (
@@ -805,7 +873,7 @@ function App() {
               {hoverPreview ? (
                 <>
                   <p className="segment-label">
-                    Segment {padSegment(hoverPreview.frame.segment)} · Frame{' '}
+                    Clip {hoverPreview.frame.clip} · Frame{' '}
                     {hoverPreview.frame.frame}
                   </p>
                   <p className="segment-meta">
@@ -823,9 +891,7 @@ function App() {
                   {hoverPreview.status === 'ready' && hoverPreview.imageUrl && (
                     <img
                       src={hoverPreview.imageUrl}
-                      alt={`Frame ${hoverPreview.frame.frame} from segment ${padSegment(
-                        hoverPreview.frame.segment
-                      )}`}
+                      alt={`Frame ${hoverPreview.frame.frame} from clip ${hoverPreview.frame.clip}`}
                     />
                   )}
                 </>
@@ -845,40 +911,42 @@ function App() {
       <section className="hand-explorer-panel">
         <div className="section-header">
           <h2>3D Hand skeleton explorer</h2>
-          <p>Average normalized hand pose reconstructed from all 21 landmarks per hand. Each finger is color-coded and labeled.</p>
+          <p>Average normalized hand poses reconstructed from all 21 landmarks per hand. Both hands are shown together with left wrist as the anchor point. Each finger is color-coded and labeled.</p>
         </div>
         {selectedCluster === null ? (
           <p className="empty-state">Select a cluster to visualize its hand skeleton.</p>
         ) : !selectedClusterLandmarks || selectedClusterLandmarks.hands.length === 0 ? (
           <p className="empty-state">No landmark data captured for this cluster yet.</p>
+        ) : !handSkeletonPlot ? (
+          <p className="empty-state">Unable to generate hand skeleton visualization.</p>
         ) : (
-          <div className="hand-skeleton-grid">
-            {handSkeletonPlots.map((plotData) => (
-              <div key={plotData.handIndex} className="hand-skeleton-pane">
-                <div className="hand-skeleton-header">
+          <div className="hand-skeleton-single">
+            <div className="hand-skeleton-info">
+              {selectedClusterLandmarks.hands.map((handData, idx) => (
+                <div key={idx} className="hand-info-badge">
                   <span
                     className="hand-skeleton-swatch"
                     style={{
-                      background: HAND_COLORS[plotData.handIndex % HAND_COLORS.length]
+                      background: HAND_COLORS[handData.hand_index % HAND_COLORS.length]
                     }}
                   />
-                  <span className="hand-skeleton-title">
-                    Hand {plotData.handIndex + 1} ({plotData.count.toLocaleString()} frames)
+                  <span>
+                    {handData.hand_index === 0 ? 'Left' : 'Right'} Hand ({handData.count.toLocaleString()} frames)
                   </span>
                 </div>
-                <div className="hand-skeleton-plot">
-                  <Plot
-                    data={plotData.traces}
-                    layout={plotData.layout}
-                    config={{
-                      displaylogo: false,
-                      responsive: true
-                    }}
-                    style={{ width: '100%', height: '450px' }}
-                  />
-                </div>
-              </div>
-            ))}
+              ))}
+            </div>
+            <div className="hand-skeleton-plot">
+              <Plot
+                data={handSkeletonPlot.traces}
+                layout={handSkeletonPlot.layout}
+                config={{
+                  displaylogo: false,
+                  responsive: true
+                }}
+                style={{ width: '100%', height: '800px' }}
+              />
+            </div>
           </div>
         )}
       </section>
@@ -897,33 +965,33 @@ function App() {
               {framesForSelectedCluster.length === 0
                 ? 'No frames available.'
                 : `${framesForSelectedCluster.length.toLocaleString()} frames across ${
-                    groupedBySegment.length
-                  } segments.`}
+                    groupedByClip.length
+                  } clips.`}
             </p>
           </div>
 
           <div className="segment-panel-content">
             <div className="segment-groups-wrapper">
               <div className="segment-groups">
-                {groupedBySegment.map(([segmentId, frames]) => (
+                {groupedByClip.map(([clipId, frames]) => (
                   <article
-                    key={segmentId}
+                    key={clipId}
                     className={`segment-group ${
-                      selectedSegment === segmentId ? 'segment-group--active' : ''
+                      selectedClip === clipId ? 'segment-group--active' : ''
                     }`}
                   >
                     <header>
       <div>
-                      <p className="segment-label">Segment {padSegment(segmentId)}</p>
+                      <p className="segment-label">Clip {clipId}</p>
                       <p className="segment-meta">
                         {frames.length} frame{frames.length === 1 ? '' : 's'}
                       </p>
       </div>
-                    <button type="button" onClick={() => handleSegmentToggle(segmentId)}>
-                      {selectedSegment === segmentId ? 'Collapse' : 'Preview'}
+                    <button type="button" onClick={() => handleClipToggle(clipId)}>
+                      {selectedClip === clipId ? 'Collapse' : 'Preview'}
                     </button>
                     </header>
-                    {selectedSegment === segmentId && (
+                    {selectedClip === clipId && (
                       <div className="frame-grid">
                         {frames.map((frame) => (
                           <button
@@ -942,7 +1010,7 @@ function App() {
                     )}
                   </article>
                 ))}
-                {groupedBySegment.length === 0 && (
+                {groupedByClip.length === 0 && (
                   <p className="empty-state">Pick a cluster to see its frames.</p>
                 )}
               </div>
@@ -952,9 +1020,9 @@ function App() {
               <div className="section-header">
                 <h2>Preview</h2>
                 <p>
-                  {selectedSegment === null
-                    ? 'Select a segment/frame to load the corresponding clip.'
-                    : `segment_${padSegment(selectedSegment)}.mp4`}
+                  {selectedClip === null
+                    ? 'Select a clip/frame to load the corresponding video.'
+                    : `${selectedClip}.mp4`}
         </p>
       </div>
               {videoSrc ? (
@@ -979,7 +1047,7 @@ function App() {
                 </>
               ) : (
                 <div className="player-placeholder">
-                  <p>No segment selected yet.</p>
+                  <p>No clip selected yet.</p>
                 </div>
               )}
             </div>
